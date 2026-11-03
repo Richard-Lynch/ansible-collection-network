@@ -1,0 +1,13 @@
+---
+# Reject a missing or placeholder tunnel token BEFORE anything is rendered: `required: true` proves
+# only that a value was supplied, and a "CHANGE_ME"-style value would render a compose file whose
+# tunnel never connects.
+- name: HARD GATE — the tunnel token is supplied and is not a placeholder
+  ansible.builtin.assert:
+    that:
+      - cloudflared_tunnel_token is string
+      - cloudflared_tunnel_token | length > 0
+      - not (cloudflared_tunnel_token is search('(?i)change.?me|placeholder|replace.?me|^todo|^xxx'))
+    fail_msg: cloudflared_tunnel_token must be supplied (from a secret store) — it is empty or a placeholder.
+    quiet: true
+  no_log: true

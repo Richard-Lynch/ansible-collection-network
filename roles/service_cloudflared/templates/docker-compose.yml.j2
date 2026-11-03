@@ -1,0 +1,27 @@
+services:
+  cloudflared:
+    container_name: {{ cloudflared_container_name }}
+    image: {{ cloudflared_image }}
+    restart: unless-stopped
+{% if cloudflared_network_mode == 'host' %}
+    # host networking so the tunnel's origin URLs mean the HOST, not this container.
+    #
+    # With the default bridge network, an ingress rule of http://localhost:3001 resolves to
+    # cloudflared's OWN container — which is listening on nothing — so every request returns
+    # "Unable to reach the origin service ... dial tcp [::1]:3001: connect: connection refused"
+    # and Cloudflare serves a 502. The origin looks healthy from the host, which is exactly what
+    # makes it confusing: `curl 127.0.0.1:3001` on the box succeeds while the tunnel cannot.
+    #
+    # The [::1] in that error is the second half of the trap: `localhost` resolves to IPv6 first,
+    # and a service bound to 127.0.0.1 is not listening there. Prefer an explicit 127.0.0.1 in the
+    # ingress rule over `localhost` for anything bound IPv4-only.
+    network_mode: host
+{% endif %}
+{# `--protocol` is configurable because QUIC (the default) is not universally reliable. On some
+   paths it fails every dial with "timeout: no recent network activity" while BOTH TCP and UDP
+   7844 to the same edge IPs are reachable — the classic symptom of a path MTU that cannot carry
+   QUIC's larger datagrams. http2 uses the same TCP/7844 that already works.
+   Most networks negotiate quic happily, so this is per-host, not a global default. #}
+    command: tunnel --protocol {{ cloudflared_protocol }} run
+    environment:
+      - TUNNEL_TOKEN={{ cloudflared_tunnel_token }}

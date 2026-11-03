@@ -1,0 +1,29 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_merge_ingress
+  short_description: Build the full tunnel ingress list with wildcard rules added
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - The tunnel configuration endpoint REPLACES the whole ingress list, so this keeps every existing rule
+      identical, replaces or adds only the I(wanted) hostnames, and keeps the catch-all rule last.
+    - Raises when the current list does not have exactly one catch-all, when a pre-existing rule would change,
+      or when a wanted rule is not a wildcard.
+  options:
+    _input:
+      description: The current ingress rules.
+      type: list
+      required: true
+    wanted:
+      description: The wildcard rules to own (each with C(hostname) and C(service)).
+      type: list
+      required: true
+EXAMPLES: |
+  - name: The ingress list to PUT
+    ansible.builtin.set_fact:
+      ingress_after: "{{ ingress_before | richard_lynch.network.hosting_edge_merge_ingress([{'hostname': '*.dev.example.com', 'service': 'http://origin.example.com:8080'}]) }}"
+RETURN:
+  _value:
+    description: The ingress list to send.
+    type: list

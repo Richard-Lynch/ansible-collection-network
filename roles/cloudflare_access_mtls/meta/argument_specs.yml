@@ -1,0 +1,660 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/cloudflare_access_mtls/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate cloudflare_access_mtls
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Cloudflare Access mTLS CA and client-certificate lifecycle
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_access_mtls_action:
+        description:
+          - Which entrypoint is running. Informational for `main`, which dispatches on it.
+          - 'report: read-only — what exists in Cloudflare and 1Password today.'
+          - 'ca: create-or-adopt the CA, store the key in 1Password, upload to Cloudflare.'
+          - 'client: issue client certificates from the declared list (+ iOS .p12 bundles).'
+          - "associate: reconcile the CA's associated_hostnames only."
+        type: str
+        required: false
+        default: report
+        choices:
+          - report
+          - ca
+          - client
+          - associate
+      cloudflare_access_mtls_account_id:
+        description:
+          - Cloudflare account id. Installation-specific, so it has no default.
+        type: str
+        required: true
+      cloudflare_access_mtls_api_token:
+        description:
+          - 'Cloudflare API token with Access: Mutual TLS Certificates Read+Write.'
+          - Resolved by the caller from its secret store; never read from a file by the role.
+        type: str
+        required: true
+        no_log: true
+      cloudflare_access_mtls_vault:
+        description:
+          - 1Password vault holding the CA key and client material.
+        type: str
+        required: true
+      cloudflare_access_mtls_workdir:
+        description:
+          - Controller-local scratch directory for key/CSR/cert material.
+          - Keep it out of version control (ignore it as a directory). The authoritative
+          - copy of every private key is 1Password; this is a working area, not storage.
+        type: str
+        required: false
+        default: .mtls-workdir
+      cloudflare_access_mtls_ca_name:
+        description:
+          - Name the CA is registered under in Cloudflare, and the idempotency key.
+          - A CA of this name is ADOPTED, never regenerated — regenerating invalidates every
+          - client certificate already issued from it.
+        type: str
+        required: false
+        default: client-ca
+      cloudflare_access_mtls_ca_subject:
+        description:
+          - OpenSSL subject for the CA certificate, e.g.
+          - /C=GB/O=Example Org/CN=Example Org Client CA.
+          - Empty by default so the role carries no organisation identity; the `ca`
+          - entrypoint refuses to run until the caller supplies it.
+        type: str
+        required: false
+        default: ''
+      cloudflare_access_mtls_ca_days:
+        description:
+          - 'CA validity in days. Long by design: rotating the CA means reissuing every client'
+          - certificate and re-associating every hostname.
+        type: int
+        required: false
+        default: 3650
+      cloudflare_access_mtls_ca_key_bits:
+        description:
+          - RSA key size for the CA.
+        type: int
+        required: false
+        default: 4096
+      cloudflare_access_mtls_ca_1p_title:
+        description:
+          - 1Password item title for the CA PRIVATE KEY. The repository never holds this value.
+        type: str
+        required: true
+      cloudflare_access_mtls_hostnames:
+        description:
+          - Hostnames the CA is associated with in Cloudflare (its associated_hostnames).
+          - A client certificate is only accepted for a hostname in this list, so ADDING A
+          - 'HOSTNAME HERE IS PART OF ONBOARDING A NEW SERVICE: add its hostname here and an'
+          - entry to cloudflare_access_mtls_clients.
+        type: list
+        required: false
+        default: []
+        elements: str
+      cloudflare_access_mtls_clients:
+        description:
+          - 'DECLARED client certificates. Each entry is data, not code:'
+          - '  name:      short identifier, used for filenames and the 1Password item title'
+          - "  common_name: the cert's CN — this is what the Access policy matches on"
+          - '  hostnames: which hostnames this client is FOR (documentation + the report;'
+          - "             enforcement is the CA's associated_hostnames plus the Access policy)"
+          - '  days:      optional validity, defaults to cloudflare_access_mtls_client_days'
+          - '  p12:       optional bool, bundle a PKCS#12 for iOS import (default false)'
+          - Adding a device is one more entry here. The role iterates this list.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      cloudflare_access_mtls_client_days:
+        description:
+          - 'Default client-certificate validity. Deliberately shorter than the CA: a device'
+          - cert expiring is recoverable, a CA expiring breaks every client at once.
+        type: int
+        required: false
+        default: 365
+      cloudflare_access_mtls_client_key_bits:
+        description:
+          - RSA key size for client certificates.
+        type: int
+        required: false
+        default: 2048
+      cloudflare_access_mtls_p12_password_1p_prefix:
+        description:
+          - 1Password title PREFIX for per-client material. Each client gets
+          - <prefix>-<name>-key and, when p12 is requested, <prefix>-<name>-p12-password.
+        type: str
+        required: true
+      cloudflare_access_mtls_apply:
+        description:
+          - GENERATE-DON'T-APPLY gate. False (default) reports the real diff and writes
+          - nothing — no key generated, no 1Password item, no Cloudflare upload.
+        type: bool
+        required: false
+        default: false
+  report:
+    short_description: 'Read-only: the live CA, its hostnames, and declared vs issued clients'
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_access_mtls_action:
+        description:
+          - Which entrypoint is running. Informational for `main`, which dispatches on it.
+          - 'report: read-only — what exists in Cloudflare and 1Password today.'
+          - 'ca: create-or-adopt the CA, store the key in 1Password, upload to Cloudflare.'
+          - 'client: issue client certificates from the declared list (+ iOS .p12 bundles).'
+          - "associate: reconcile the CA's associated_hostnames only."
+        type: str
+        required: false
+        default: report
+        choices:
+          - report
+          - ca
+          - client
+          - associate
+      cloudflare_access_mtls_account_id:
+        description:
+          - Cloudflare account id. Installation-specific, so it has no default.
+        type: str
+        required: true
+      cloudflare_access_mtls_api_token:
+        description:
+          - 'Cloudflare API token with Access: Mutual TLS Certificates Read+Write.'
+          - Resolved by the caller from its secret store; never read from a file by the role.
+        type: str
+        required: true
+        no_log: true
+      cloudflare_access_mtls_vault:
+        description:
+          - 1Password vault holding the CA key and client material.
+        type: str
+        required: true
+      cloudflare_access_mtls_workdir:
+        description:
+          - Controller-local scratch directory for key/CSR/cert material.
+          - Keep it out of version control (ignore it as a directory). The authoritative
+          - copy of every private key is 1Password; this is a working area, not storage.
+        type: str
+        required: false
+        default: .mtls-workdir
+      cloudflare_access_mtls_ca_name:
+        description:
+          - Name the CA is registered under in Cloudflare, and the idempotency key.
+          - A CA of this name is ADOPTED, never regenerated — regenerating invalidates every
+          - client certificate already issued from it.
+        type: str
+        required: false
+        default: client-ca
+      cloudflare_access_mtls_ca_subject:
+        description:
+          - OpenSSL subject for the CA certificate, e.g.
+          - /C=GB/O=Example Org/CN=Example Org Client CA.
+          - Empty by default so the role carries no organisation identity; the `ca`
+          - entrypoint refuses to run until the caller supplies it.
+        type: str
+        required: false
+        default: ''
+      cloudflare_access_mtls_ca_days:
+        description:
+          - 'CA validity in days. Long by design: rotating the CA means reissuing every client'
+          - certificate and re-associating every hostname.
+        type: int
+        required: false
+        default: 3650
+      cloudflare_access_mtls_ca_key_bits:
+        description:
+          - RSA key size for the CA.
+        type: int
+        required: false
+        default: 4096
+      cloudflare_access_mtls_ca_1p_title:
+        description:
+          - 1Password item title for the CA PRIVATE KEY. The repository never holds this value.
+        type: str
+        required: true
+      cloudflare_access_mtls_hostnames:
+        description:
+          - Hostnames the CA is associated with in Cloudflare (its associated_hostnames).
+          - A client certificate is only accepted for a hostname in this list, so ADDING A
+          - 'HOSTNAME HERE IS PART OF ONBOARDING A NEW SERVICE: add its hostname here and an'
+          - entry to cloudflare_access_mtls_clients.
+        type: list
+        required: false
+        default: []
+        elements: str
+      cloudflare_access_mtls_clients:
+        description:
+          - 'DECLARED client certificates. Each entry is data, not code:'
+          - '  name:      short identifier, used for filenames and the 1Password item title'
+          - "  common_name: the cert's CN — this is what the Access policy matches on"
+          - '  hostnames: which hostnames this client is FOR (documentation + the report;'
+          - "             enforcement is the CA's associated_hostnames plus the Access policy)"
+          - '  days:      optional validity, defaults to cloudflare_access_mtls_client_days'
+          - '  p12:       optional bool, bundle a PKCS#12 for iOS import (default false)'
+          - Adding a device is one more entry here. The role iterates this list.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      cloudflare_access_mtls_client_days:
+        description:
+          - 'Default client-certificate validity. Deliberately shorter than the CA: a device'
+          - cert expiring is recoverable, a CA expiring breaks every client at once.
+        type: int
+        required: false
+        default: 365
+      cloudflare_access_mtls_client_key_bits:
+        description:
+          - RSA key size for client certificates.
+        type: int
+        required: false
+        default: 2048
+      cloudflare_access_mtls_p12_password_1p_prefix:
+        description:
+          - 1Password title PREFIX for per-client material. Each client gets
+          - <prefix>-<name>-key and, when p12 is requested, <prefix>-<name>-p12-password.
+        type: str
+        required: true
+      cloudflare_access_mtls_apply:
+        description:
+          - GENERATE-DON'T-APPLY gate. False (default) reports the real diff and writes
+          - nothing — no key generated, no 1Password item, no Cloudflare upload.
+        type: bool
+        required: false
+        default: false
+  ca:
+    short_description: Create-or-adopt the client CA, store its key in 1Password, upload it
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_access_mtls_action:
+        description:
+          - Which entrypoint is running. Informational for `main`, which dispatches on it.
+          - 'report: read-only — what exists in Cloudflare and 1Password today.'
+          - 'ca: create-or-adopt the CA, store the key in 1Password, upload to Cloudflare.'
+          - 'client: issue client certificates from the declared list (+ iOS .p12 bundles).'
+          - "associate: reconcile the CA's associated_hostnames only."
+        type: str
+        required: false
+        default: report
+        choices:
+          - report
+          - ca
+          - client
+          - associate
+      cloudflare_access_mtls_account_id:
+        description:
+          - Cloudflare account id. Installation-specific, so it has no default.
+        type: str
+        required: true
+      cloudflare_access_mtls_api_token:
+        description:
+          - 'Cloudflare API token with Access: Mutual TLS Certificates Read+Write.'
+          - Resolved by the caller from its secret store; never read from a file by the role.
+        type: str
+        required: true
+        no_log: true
+      cloudflare_access_mtls_vault:
+        description:
+          - 1Password vault holding the CA key and client material.
+        type: str
+        required: true
+      cloudflare_access_mtls_workdir:
+        description:
+          - Controller-local scratch directory for key/CSR/cert material.
+          - Keep it out of version control (ignore it as a directory). The authoritative
+          - copy of every private key is 1Password; this is a working area, not storage.
+        type: str
+        required: false
+        default: .mtls-workdir
+      cloudflare_access_mtls_ca_name:
+        description:
+          - Name the CA is registered under in Cloudflare, and the idempotency key.
+          - A CA of this name is ADOPTED, never regenerated — regenerating invalidates every
+          - client certificate already issued from it.
+        type: str
+        required: false
+        default: client-ca
+      cloudflare_access_mtls_ca_subject:
+        description:
+          - OpenSSL subject for the CA certificate, e.g.
+          - /C=GB/O=Example Org/CN=Example Org Client CA.
+          - Empty by default so the role carries no organisation identity; the `ca`
+          - entrypoint refuses to run until the caller supplies it.
+        type: str
+        required: false
+        default: ''
+      cloudflare_access_mtls_ca_days:
+        description:
+          - 'CA validity in days. Long by design: rotating the CA means reissuing every client'
+          - certificate and re-associating every hostname.
+        type: int
+        required: false
+        default: 3650
+      cloudflare_access_mtls_ca_key_bits:
+        description:
+          - RSA key size for the CA.
+        type: int
+        required: false
+        default: 4096
+      cloudflare_access_mtls_ca_1p_title:
+        description:
+          - 1Password item title for the CA PRIVATE KEY. The repository never holds this value.
+        type: str
+        required: true
+      cloudflare_access_mtls_hostnames:
+        description:
+          - Hostnames the CA is associated with in Cloudflare (its associated_hostnames).
+          - A client certificate is only accepted for a hostname in this list, so ADDING A
+          - 'HOSTNAME HERE IS PART OF ONBOARDING A NEW SERVICE: add its hostname here and an'
+          - entry to cloudflare_access_mtls_clients.
+        type: list
+        required: false
+        default: []
+        elements: str
+      cloudflare_access_mtls_clients:
+        description:
+          - 'DECLARED client certificates. Each entry is data, not code:'
+          - '  name:      short identifier, used for filenames and the 1Password item title'
+          - "  common_name: the cert's CN — this is what the Access policy matches on"
+          - '  hostnames: which hostnames this client is FOR (documentation + the report;'
+          - "             enforcement is the CA's associated_hostnames plus the Access policy)"
+          - '  days:      optional validity, defaults to cloudflare_access_mtls_client_days'
+          - '  p12:       optional bool, bundle a PKCS#12 for iOS import (default false)'
+          - Adding a device is one more entry here. The role iterates this list.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      cloudflare_access_mtls_client_days:
+        description:
+          - 'Default client-certificate validity. Deliberately shorter than the CA: a device'
+          - cert expiring is recoverable, a CA expiring breaks every client at once.
+        type: int
+        required: false
+        default: 365
+      cloudflare_access_mtls_client_key_bits:
+        description:
+          - RSA key size for client certificates.
+        type: int
+        required: false
+        default: 2048
+      cloudflare_access_mtls_p12_password_1p_prefix:
+        description:
+          - 1Password title PREFIX for per-client material. Each client gets
+          - <prefix>-<name>-key and, when p12 is requested, <prefix>-<name>-p12-password.
+        type: str
+        required: true
+      cloudflare_access_mtls_apply:
+        description:
+          - GENERATE-DON'T-APPLY gate. False (default) reports the real diff and writes
+          - nothing — no key generated, no 1Password item, no Cloudflare upload.
+        type: bool
+        required: false
+        default: false
+  client:
+    short_description: Issue declared client certificates from the CA (+ optional iOS .p12)
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_access_mtls_action:
+        description:
+          - Which entrypoint is running. Informational for `main`, which dispatches on it.
+          - 'report: read-only — what exists in Cloudflare and 1Password today.'
+          - 'ca: create-or-adopt the CA, store the key in 1Password, upload to Cloudflare.'
+          - 'client: issue client certificates from the declared list (+ iOS .p12 bundles).'
+          - "associate: reconcile the CA's associated_hostnames only."
+        type: str
+        required: false
+        default: report
+        choices:
+          - report
+          - ca
+          - client
+          - associate
+      cloudflare_access_mtls_account_id:
+        description:
+          - Cloudflare account id. Installation-specific, so it has no default.
+        type: str
+        required: true
+      cloudflare_access_mtls_api_token:
+        description:
+          - 'Cloudflare API token with Access: Mutual TLS Certificates Read+Write.'
+          - Resolved by the caller from its secret store; never read from a file by the role.
+        type: str
+        required: true
+        no_log: true
+      cloudflare_access_mtls_vault:
+        description:
+          - 1Password vault holding the CA key and client material.
+        type: str
+        required: true
+      cloudflare_access_mtls_workdir:
+        description:
+          - Controller-local scratch directory for key/CSR/cert material.
+          - Keep it out of version control (ignore it as a directory). The authoritative
+          - copy of every private key is 1Password; this is a working area, not storage.
+        type: str
+        required: false
+        default: .mtls-workdir
+      cloudflare_access_mtls_ca_name:
+        description:
+          - Name the CA is registered under in Cloudflare, and the idempotency key.
+          - A CA of this name is ADOPTED, never regenerated — regenerating invalidates every
+          - client certificate already issued from it.
+        type: str
+        required: false
+        default: client-ca
+      cloudflare_access_mtls_ca_subject:
+        description:
+          - OpenSSL subject for the CA certificate, e.g.
+          - /C=GB/O=Example Org/CN=Example Org Client CA.
+          - Empty by default so the role carries no organisation identity; the `ca`
+          - entrypoint refuses to run until the caller supplies it.
+        type: str
+        required: false
+        default: ''
+      cloudflare_access_mtls_ca_days:
+        description:
+          - 'CA validity in days. Long by design: rotating the CA means reissuing every client'
+          - certificate and re-associating every hostname.
+        type: int
+        required: false
+        default: 3650
+      cloudflare_access_mtls_ca_key_bits:
+        description:
+          - RSA key size for the CA.
+        type: int
+        required: false
+        default: 4096
+      cloudflare_access_mtls_ca_1p_title:
+        description:
+          - 1Password item title for the CA PRIVATE KEY. The repository never holds this value.
+        type: str
+        required: true
+      cloudflare_access_mtls_hostnames:
+        description:
+          - Hostnames the CA is associated with in Cloudflare (its associated_hostnames).
+          - A client certificate is only accepted for a hostname in this list, so ADDING A
+          - 'HOSTNAME HERE IS PART OF ONBOARDING A NEW SERVICE: add its hostname here and an'
+          - entry to cloudflare_access_mtls_clients.
+        type: list
+        required: false
+        default: []
+        elements: str
+      cloudflare_access_mtls_clients:
+        description:
+          - 'DECLARED client certificates. Each entry is data, not code:'
+          - '  name:      short identifier, used for filenames and the 1Password item title'
+          - "  common_name: the cert's CN — this is what the Access policy matches on"
+          - '  hostnames: which hostnames this client is FOR (documentation + the report;'
+          - "             enforcement is the CA's associated_hostnames plus the Access policy)"
+          - '  days:      optional validity, defaults to cloudflare_access_mtls_client_days'
+          - '  p12:       optional bool, bundle a PKCS#12 for iOS import (default false)'
+          - Adding a device is one more entry here. The role iterates this list.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      cloudflare_access_mtls_client_days:
+        description:
+          - 'Default client-certificate validity. Deliberately shorter than the CA: a device'
+          - cert expiring is recoverable, a CA expiring breaks every client at once.
+        type: int
+        required: false
+        default: 365
+      cloudflare_access_mtls_client_key_bits:
+        description:
+          - RSA key size for client certificates.
+        type: int
+        required: false
+        default: 2048
+      cloudflare_access_mtls_p12_password_1p_prefix:
+        description:
+          - 1Password title PREFIX for per-client material. Each client gets
+          - <prefix>-<name>-key and, when p12 is requested, <prefix>-<name>-p12-password.
+        type: str
+        required: true
+      cloudflare_access_mtls_apply:
+        description:
+          - GENERATE-DON'T-APPLY gate. False (default) reports the real diff and writes
+          - nothing — no key generated, no 1Password item, no Cloudflare upload.
+        type: bool
+        required: false
+        default: false
+  associate:
+    short_description: Reconcile the CA's associated_hostnames against the declared list
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_access_mtls_action:
+        description:
+          - Which entrypoint is running. Informational for `main`, which dispatches on it.
+          - 'report: read-only — what exists in Cloudflare and 1Password today.'
+          - 'ca: create-or-adopt the CA, store the key in 1Password, upload to Cloudflare.'
+          - 'client: issue client certificates from the declared list (+ iOS .p12 bundles).'
+          - "associate: reconcile the CA's associated_hostnames only."
+        type: str
+        required: false
+        default: report
+        choices:
+          - report
+          - ca
+          - client
+          - associate
+      cloudflare_access_mtls_account_id:
+        description:
+          - Cloudflare account id. Installation-specific, so it has no default.
+        type: str
+        required: true
+      cloudflare_access_mtls_api_token:
+        description:
+          - 'Cloudflare API token with Access: Mutual TLS Certificates Read+Write.'
+          - Resolved by the caller from its secret store; never read from a file by the role.
+        type: str
+        required: true
+        no_log: true
+      cloudflare_access_mtls_vault:
+        description:
+          - 1Password vault holding the CA key and client material.
+        type: str
+        required: true
+      cloudflare_access_mtls_workdir:
+        description:
+          - Controller-local scratch directory for key/CSR/cert material.
+          - Keep it out of version control (ignore it as a directory). The authoritative
+          - copy of every private key is 1Password; this is a working area, not storage.
+        type: str
+        required: false
+        default: .mtls-workdir
+      cloudflare_access_mtls_ca_name:
+        description:
+          - Name the CA is registered under in Cloudflare, and the idempotency key.
+          - A CA of this name is ADOPTED, never regenerated — regenerating invalidates every
+          - client certificate already issued from it.
+        type: str
+        required: false
+        default: client-ca
+      cloudflare_access_mtls_ca_subject:
+        description:
+          - OpenSSL subject for the CA certificate, e.g.
+          - /C=GB/O=Example Org/CN=Example Org Client CA.
+          - Empty by default so the role carries no organisation identity; the `ca`
+          - entrypoint refuses to run until the caller supplies it.
+        type: str
+        required: false
+        default: ''
+      cloudflare_access_mtls_ca_days:
+        description:
+          - 'CA validity in days. Long by design: rotating the CA means reissuing every client'
+          - certificate and re-associating every hostname.
+        type: int
+        required: false
+        default: 3650
+      cloudflare_access_mtls_ca_key_bits:
+        description:
+          - RSA key size for the CA.
+        type: int
+        required: false
+        default: 4096
+      cloudflare_access_mtls_ca_1p_title:
+        description:
+          - 1Password item title for the CA PRIVATE KEY. The repository never holds this value.
+        type: str
+        required: true
+      cloudflare_access_mtls_hostnames:
+        description:
+          - Hostnames the CA is associated with in Cloudflare (its associated_hostnames).
+          - A client certificate is only accepted for a hostname in this list, so ADDING A
+          - 'HOSTNAME HERE IS PART OF ONBOARDING A NEW SERVICE: add its hostname here and an'
+          - entry to cloudflare_access_mtls_clients.
+        type: list
+        required: false
+        default: []
+        elements: str
+      cloudflare_access_mtls_clients:
+        description:
+          - 'DECLARED client certificates. Each entry is data, not code:'
+          - '  name:      short identifier, used for filenames and the 1Password item title'
+          - "  common_name: the cert's CN — this is what the Access policy matches on"
+          - '  hostnames: which hostnames this client is FOR (documentation + the report;'
+          - "             enforcement is the CA's associated_hostnames plus the Access policy)"
+          - '  days:      optional validity, defaults to cloudflare_access_mtls_client_days'
+          - '  p12:       optional bool, bundle a PKCS#12 for iOS import (default false)'
+          - Adding a device is one more entry here. The role iterates this list.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      cloudflare_access_mtls_client_days:
+        description:
+          - 'Default client-certificate validity. Deliberately shorter than the CA: a device'
+          - cert expiring is recoverable, a CA expiring breaks every client at once.
+        type: int
+        required: false
+        default: 365
+      cloudflare_access_mtls_client_key_bits:
+        description:
+          - RSA key size for client certificates.
+        type: int
+        required: false
+        default: 2048
+      cloudflare_access_mtls_p12_password_1p_prefix:
+        description:
+          - 1Password title PREFIX for per-client material. Each client gets
+          - <prefix>-<name>-key and, when p12 is requested, <prefix>-<name>-p12-password.
+        type: str
+        required: true
+      cloudflare_access_mtls_apply:
+        description:
+          - GENERATE-DON'T-APPLY gate. False (default) reports the real diff and writes
+          - nothing — no key generated, no 1Password item, no Cloudflare upload.
+        type: bool
+        required: false
+        default: false

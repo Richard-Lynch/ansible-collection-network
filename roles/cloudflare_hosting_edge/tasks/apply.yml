@@ -1,0 +1,310 @@
+---
+# cloudflare_hosting_edge — the writes, each followed by a read-back from the controller itself.
+# Included only when cloudflare_hosting_edge_apply is true.
+
+# ORDER: tokens and Access apps FIRST, the route and DNS LAST. The route and the
+# proxied record are what make a name reachable; if the run dies between them and the Access app,
+# the wildcard would be routed with nothing gating it (or only the zone-wide wildcard, which is not
+# assumed to cover a two-label name). Done this way a mid-run failure leaves a gated name that
+# does not resolve yet, which is safe.
+
+# ---------------------------------------------------------------------------------------------
+# 1. SERVICE TOKENS (one per tier; a lost token revokes one tier) -> 1Password.
+# ---------------------------------------------------------------------------------------------
+- name: HARD GATE — an apply has a 1Password vault to store the service tokens in
+  # Cloudflare returns a service token's secret exactly once, at creation, so there must be
+  # somewhere to put it BEFORE anything is created.
+  ansible.builtin.assert:
+    that:
+      - (cloudflare_hosting_edge_op_vault | default('')) | length > 0
+    fail_msg: >-
+      cloudflare_hosting_edge_op_vault is required for an apply: created service tokens are stored
+      in 1Password through richard_lynch.common.secrets_manager.
+    quiet: true
+
+- name: Read the existing service tokens
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/service_tokens"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_tokens_raw
+  changed_when: false
+  no_log: true
+
+- name: Create each missing service token
+  # Cloudflare returns client_secret EXACTLY ONCE, here. The two store steps below run
+  # immediately; if the play dies between, the token must be deleted and recreated.
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/service_tokens"
+    method: POST
+    headers: { Authorization: "Bearer {{ _cfhe_token }}", Content-Type: application/json }
+    body_format: json
+    body: { name: "{{ item.token_name }}" }
+    status_code: [200, 201]
+    return_content: true
+  register: _cfhe_tokens_created
+  changed_when: true
+  no_log: true
+  loop: "{{ _cfhe_apps }}"
+  loop_control:
+    label: "{{ item.token_name }}"
+  when: item.token_name not in ((_cfhe_tokens_raw.content | from_json).result | map(attribute='name') | list)
+
+- name: Store each new token's client id in 1Password
+  ansible.builtin.include_role:
+    name: richard_lynch.common.secrets_manager
+    apply: { no_log: true }
+  vars:
+    secrets_manager_action: ensure
+    secrets_manager_title: "{{ item.item.id_item }}"
+    secrets_manager_vault: "{{ cloudflare_hosting_edge_op_vault }}"
+    secrets_manager_category: "API Credential"
+    secrets_manager_value: "{{ (item.content | from_json).result.client_id }}"
+    secrets_manager_notes: >-
+      Cloudflare Access service token client_id for '{{ item.item.token_name }}', sent as
+      CF-Access-Client-Id to cross the {{ item.item.domain }} Access app. Created by
+      cloudflare_hosting_edge.
+  loop: "{{ _cfhe_tokens_created.results | default([]) | selectattr('content', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.id_item }}"
+  no_log: true
+
+- name: Store each new token's client secret in 1Password
+  ansible.builtin.include_role:
+    name: richard_lynch.common.secrets_manager
+    apply: { no_log: true }
+  vars:
+    secrets_manager_action: ensure
+    secrets_manager_title: "{{ item.item.secret_item }}"
+    secrets_manager_vault: "{{ cloudflare_hosting_edge_op_vault }}"
+    secrets_manager_category: "API Credential"
+    secrets_manager_value: "{{ (item.content | from_json).result.client_secret }}"
+    secrets_manager_notes: >-
+      Cloudflare Access service token client_secret for '{{ item.item.token_name }}'. SENSITIVE:
+      returned by Cloudflare exactly once, at creation. If lost, delete the token and re-run.
+  loop: "{{ _cfhe_tokens_created.results | default([]) | selectattr('content', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.item.secret_item }}"
+  no_log: true
+
+- name: Re-read the service tokens so every id is known
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/service_tokens"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_tokens_after
+  changed_when: false
+  no_log: true
+
+# ---------------------------------------------------------------------------------------------
+# 2. WILDCARD ACCESS APPS. non_identity (service token) + allow (the SSO group). Never `bypass`.
+# ---------------------------------------------------------------------------------------------
+- name: Create each missing wildcard Access app
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/apps"
+    method: POST
+    headers: { Authorization: "Bearer {{ _cfhe_token }}", Content-Type: application/json }
+    body_format: json
+    body:
+      name: "{{ item.name }}"
+      type: self_hosted
+      domain: "{{ item.domain }}"
+      self_hosted_domains: ["{{ item.domain }}"]
+      session_duration: "{{ cloudflare_hosting_edge_session_duration }}"
+      policies:
+        - name: "{{ item.name }} (device)"
+          decision: non_identity
+          include:
+            - service_token:
+                token_id: >-
+                  {{ ((_cfhe_tokens_after.content | from_json).result
+                      | selectattr('name', 'equalto', item.token_name) | list | first).id }}
+        - name: "{{ item.name }} (owner)"
+          decision: allow
+          include:
+            - group: { id: "{{ cloudflare_hosting_edge_sso_group_id }}" }
+    status_code: [200, 201]
+  register: _cfhe_app_created
+  changed_when: true
+  no_log: true
+  loop: "{{ _cfhe_apps }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.domain not in (_cfhe_app_list | map(attribute='domain') | list)
+
+- name: Re-read every Access app
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/apps?per_page=1000"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_apps_after_raw
+  changed_when: false
+  no_log: true
+
+- name: Parse the post-write apps
+  ansible.builtin.set_fact:
+    _cfhe_app_list_after: "{{ (_cfhe_apps_after_raw.content | from_json).result | default([], true) }}"
+
+- name: VERIFY — each wildcard app has exactly one non_identity and one allow policy, no bypass, and its one domain
+  ansible.builtin.assert:
+    that:
+      - _cfhe_this is not none
+      - _cfhe_this.domain == item.domain
+      - (_cfhe_this.self_hosted_domains | default([item.domain])) == [item.domain]
+      - (_cfhe_this.policies | default([]) | selectattr('decision', 'equalto', 'non_identity') | list | length) == 1
+      - (_cfhe_this.policies | default([]) | selectattr('decision', 'equalto', 'allow') | list | length) == 1
+      - (_cfhe_this.policies | default([]) | selectattr('decision', 'equalto', 'bypass') | list | length) == 0
+    fail_msg: "{{ item.domain }}: expected one app with exactly one non_identity, one allow and no bypass. Found {{ _cfhe_this.policies | default([]) | map(attribute='decision') | list if _cfhe_this else 'NO APP' }}."
+    quiet: true
+  vars:
+    _cfhe_this: "{{ _cfhe_app_list_after | selectattr('domain', 'equalto', item.domain) | list | first | default(None) }}"
+  loop: "{{ _cfhe_apps }}"
+  loop_control:
+    label: "{{ item.domain }}"
+
+- name: VERIFY — the zone-wide wildcard app is untouched
+  ansible.builtin.assert:
+    that:
+      - _cfhe_zone_app_after is not none
+      - _cfhe_zone_app_after.domain == _cfhe_zone_app_before.domain
+      - (_cfhe_zone_app_after.policies | default([]) | length) == (_cfhe_zone_app_before.policies | default([]) | length)
+    fail_msg: "The zone-wide wildcard app changed; this role must never modify it."
+    quiet: true
+  vars:
+    _cfhe_zone_app_after: "{{ _cfhe_app_list_after | selectattr('id', 'equalto', cloudflare_hosting_edge_zone_app_id) | list | first | default(None) }}"
+
+- name: VERIFY — after the write, every existing hostname still has the same winning app
+  ansible.builtin.assert:
+    that:
+      - _cfhe_changed_after | length == 0
+    fail_msg: "After the write, the winning Access app changed for {{ _cfhe_changed_after }}."
+    quiet: true
+  vars:
+    _cfhe_changed_after: "{{ _cfhe_app_list | richard_lynch.network.hosting_edge_winner_diff(_cfhe_app_list_after, _cfhe_existing_hosts) }}"
+
+
+# ---------------------------------------------------------------------------------------------
+# 3. TUNNEL ROUTES. PUT .../configurations REPLACES the whole ingress list, so merge in a filter
+# that keeps every pre-existing rule byte-identical and the catch-all last, then read back.
+# ---------------------------------------------------------------------------------------------
+- name: Build the merged ingress list
+  ansible.builtin.set_fact:
+    _cfhe_ingress_after: "{{ _cfhe_tunnel_cfg.ingress | richard_lynch.network.hosting_edge_merge_ingress(_cfhe_wanted_rules) }}"
+
+- name: Write the tunnel configuration
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/cfd_tunnel/{{ cloudflare_hosting_edge_tunnel_id }}/configurations"
+    method: PUT
+    headers: { Authorization: "Bearer {{ _cfhe_token }}", Content-Type: application/json }
+    body_format: json
+    body:
+      config: "{{ _cfhe_tunnel_cfg | combine({'ingress': _cfhe_ingress_after}) }}"
+    status_code: [200]
+    return_content: true
+  register: _cfhe_tunnel_put
+  changed_when: _cfhe_ingress_after != _cfhe_tunnel_cfg.ingress
+  no_log: true
+
+- name: Read the tunnel configuration back
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/cfd_tunnel/{{ cloudflare_hosting_edge_tunnel_id }}/configurations"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_tunnel_after_raw
+  changed_when: false
+  no_log: true
+
+- name: HARD GATE — the controller stored the wildcard routes AND every pre-existing rule unchanged
+  ansible.builtin.assert:
+    that:
+      - _cfhe_stored | length == (_cfhe_tunnel_cfg.ingress | length) + (_cfhe_new_count | int)
+      - _cfhe_lost | length == 0
+      - _cfhe_wanted_rules | map(attribute='service') | difference(_cfhe_stored | map(attribute='service') | list) | length == 0
+      - "'hostname' not in _cfhe_stored[-1]"
+    fail_msg: >-
+      Tunnel read-back mismatch. Pre-existing rules that changed or vanished: {{ _cfhe_lost }}.
+      If any are listed they are OFFLINE NOW; restore them from the before-state.
+    quiet: true
+  vars:
+    _cfhe_stored: "{{ (_cfhe_tunnel_after_raw.content | from_json).result.config.ingress }}"
+    _cfhe_wanted_names: "{{ _cfhe_wanted_rules | map(attribute='hostname') | list }}"
+    _cfhe_new_count: >-
+      {{ _cfhe_wanted_names | difference(_cfhe_tunnel_cfg.ingress | selectattr('hostname', 'defined') | map(attribute='hostname') | list) | length }}
+    _cfhe_lost: >-
+      {{ _cfhe_tunnel_cfg.ingress | selectattr('hostname', 'defined')
+         | rejectattr('hostname', 'in', _cfhe_wanted_names)
+         | reject('in', _cfhe_stored) | map(attribute='hostname') | list }}
+
+# ---------------------------------------------------------------------------------------------
+# 4. WILDCARD DNS. Proxied, or the request would bypass Cloudflare and Access entirely.
+# ---------------------------------------------------------------------------------------------
+- name: Read each wildcard's existing DNS record
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/dns_records?name={{ item | urlencode }}"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_dns_existing
+  changed_when: false
+  no_log: true
+  loop: "{{ _cfhe_wildcards }}"
+
+- name: HARD GATE — a pre-existing wildcard record must already be the one we would create
+  # Never overwrite someone else's record: a wildcard A record to a public IP would be an unproxied
+  # path around Access.
+  ansible.builtin.assert:
+    that:
+      - (item.content | from_json).result | length == 0 or _cfhe_rec.type == 'CNAME'
+      - (item.content | from_json).result | length == 0 or _cfhe_rec.content == _cfhe_target
+      - (item.content | from_json).result | length == 0 or _cfhe_rec.proxied | bool
+    fail_msg: "{{ item.item }} already exists as {{ _cfhe_rec | default({}) }}, which is not the proxied tunnel CNAME this role manages. Not touching it."
+    quiet: true
+  vars:
+    _cfhe_rec: "{{ ((item.content | from_json).result | first) | default({}) }}"
+    _cfhe_target: "{{ cloudflare_hosting_edge_tunnel_id }}.cfargotunnel.com"
+  loop: "{{ _cfhe_dns_existing.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Create the missing wildcard records
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/dns_records"
+    method: POST
+    headers: { Authorization: "Bearer {{ _cfhe_token }}", Content-Type: application/json }
+    body_format: json
+    body:
+      type: CNAME
+      name: "{{ item.item }}"
+      content: "{{ cloudflare_hosting_edge_tunnel_id }}.cfargotunnel.com"
+      proxied: true
+      comment: "hosting tier wildcard (cloudflare_hosting_edge)"
+    status_code: [200]
+  register: _cfhe_dns_created
+  changed_when: true
+  no_log: true
+  loop: "{{ _cfhe_dns_existing.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (item.content | from_json).result | length == 0
+
+- name: Read the wildcard records back
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/dns_records?name={{ item | urlencode }}"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_dns_after
+  changed_when: false
+  no_log: true
+  loop: "{{ _cfhe_wildcards }}"
+
+- name: HARD GATE — each wildcard record exists, is a CNAME to the tunnel, and is PROXIED
+  ansible.builtin.assert:
+    that:
+      - (item.content | from_json).result | length == 1
+      - ((item.content | from_json).result | first).type == 'CNAME'
+      - ((item.content | from_json).result | first).content == cloudflare_hosting_edge_tunnel_id ~ '.cfargotunnel.com'
+      - ((item.content | from_json).result | first).proxied | bool
+    fail_msg: "{{ item.item }} is missing, not a CNAME to the tunnel, or not proxied (an unproxied record bypasses Access)."
+    quiet: true
+  loop: "{{ _cfhe_dns_after.results }}"
+  loop_control:
+    label: "{{ item.item }}"

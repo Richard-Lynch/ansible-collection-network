@@ -1,0 +1,76 @@
+# Assert on what the REAL role did in converge.yml.
+#
+# Every fact here was produced by calling the role itself, not by re-deriving its filter expressions
+# over a hand-typed stub — so a regression in tasks/_guards.yml turns this red instead of leaving it
+# green (a test that mirrors the code it tests can never fail).
+---
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Read the guard outcomes recorded by converge
+      # Across the converge/verify playbook boundary a fact does not survive; a file does.
+      ansible.builtin.slurp:
+        src: /tmp/molecule-hcf-guards.json
+      register: _raw
+
+    - name: Parse them
+      ansible.builtin.set_fact:
+        _g: "{{ _raw.content | b64decode | from_json }}"
+
+    - name: THE LOCKOUT GUARD must have fired
+      # Kept as its own assertion with its own message because the consequence is not like the
+      # others: a regression here does not produce a bad rule, it removes SSH from a public host
+      # with no other access path.
+      ansible.builtin.assert:
+        that:
+          # Must have been refused by a GUARD, not by the downstream API call. Asserting merely
+          # "it failed" is what let a sabotaged guard pass: with the guard disabled the case ran on
+          # to "Read the current firewalls", failed on the fake token, and rescue recorded a
+          # failure indistinguishable from a refusal.
+          - "'GUARD' in _g.lockout"
+          - "'required inbound port' in _g.lockout"
+        fail_msg: >-
+          THE LOCKOUT GUARD DID NOT FIRE. A declaration omitting inbound TCP 22 was accepted.
+          Because set_rules REPLACES the entire rule set, applying such a declaration DELETES SSH
+          from a host whose only access path is SSH — unrecoverable without the provider console.
+          Fix tasks/_guards.yml before this role is run against anything real.
+        success_msg: "Lockout guard fired: a declaration missing port 22 was refused."
+        quiet: true
+
+    - name: The declaration-hygiene guards must each have fired
+      ansible.builtin.assert:
+        that:
+          # Each must name the SPECIFIC guard under test — not just any guard, and not the API
+          # task. A fixture with two defects would otherwise be refused by the wrong guard and
+          # still look green, which is exactly how the lockout case first passed while disabled.
+          - "'description' in _g.desc"
+          - "'description' in _g.desc_empty"
+          - "'directions and protocols' in _g.direction"
+          - "'declare a source' in _g.scope"
+        fail_msg: >-
+          The wrong thing refused a case (each value is the task that actually failed) —
+          missing-description={{ _g.desc }}, empty-description={{ _g.desc_empty }},
+          bad-direction={{ _g.direction }}, missing-source_ips={{ _g.scope }}. Each of these accepts a rule that is either
+          unjustifiable (no description), wrong-sided (bad direction), or matches nothing at all
+          (no source_ips) while reading as real protection.
+        success_msg: "All four declaration-hygiene guards fired."
+        quiet: true
+
+    - name: A VALID declaration must NOT be refused by any guard
+      # The test that stops the others being satisfiable by a role that refuses everything. The
+      # valid case is expected to fail at the API call (fake token, no network contract in CI) —
+      # what must NOT happen is a GUARD rejecting it. Asserting on the failed task's NAME tells
+      # those two apart; asserting merely "it failed" would not.
+      ansible.builtin.assert:
+        that:
+          - "'GUARD' not in _g.valid_outcome"
+        fail_msg: >-
+          A valid declaration was refused by {{ _g.valid_outcome }}. The guards are over-strict:
+          they reject a rule set that declares inbound TCP 22 with a source and a description,
+          which is exactly what a correct declaration looks like.
+        success_msg: >-
+          Valid declaration passed every guard (outcome: {{ _g.valid_outcome }}) — the guards
+          discriminate rather than refusing unconditionally.
+        quiet: true

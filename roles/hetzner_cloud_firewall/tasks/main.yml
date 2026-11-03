@@ -1,0 +1,132 @@
+---
+# Reconcile a Hetzner Cloud firewall to a declared rule set.
+#
+# WHY A CLOUD FIREWALL NEEDS ITS OWN ROLE. It sits IN FRONT of the VM and is INVISIBLE from inside
+# it — `ufw status`, `nft list ruleset` and `iptables -L` all report nothing about it. A play that
+# checks the host's own rules will confidently conclude there is no firewall, and an outside-in TCP
+# probe cannot tell either when the firewall permits precisely the ports being probed. The usual
+# symptom is UDP traffic (a WireGuard handshake, say) that vanishes with no trace on either side.
+#
+# REPLACE, NOT MERGE. The API's set_rules endpoint overwrites the whole rule set, so a rule omitted
+# from the declaration is a rule deleted. Deliberate: the repo is the source of truth, and a merge
+# would let console-added rules accumulate invisibly, until a rule for a long-gone service is one
+# nobody can account for.
+#
+# It REFUSES to create a firewall. Attaching a new one to a live public server is how a host loses
+# SSH; that stays a deliberate console action.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Run the generated argspec guards
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Run the safety guards
+  ansible.builtin.include_tasks: _guards.yml
+
+- name: Read the current firewalls
+  # delegate_to: localhost — this is an API call about a host, not a command on it. It must work
+  # even when the host is unreachable, which is precisely when a firewall change matters most.
+  ansible.builtin.uri:
+    url: "https://api.hetzner.cloud/v1/firewalls"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ hetzner_api_token }}"
+    status_code: [200]
+  register: _hcf_current
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  no_log: true # the Authorization header
+
+- name: Locate the named firewall
+  ansible.builtin.set_fact:
+    _hcf_match: "{{ _hcf_current.json.firewalls | selectattr('name', 'eq', hetzner_firewall_name) | list }}"
+
+- name: HARD GATE — the firewall must already exist
+  ansible.builtin.assert:
+    that:
+      - "_hcf_match | length == 1"
+    fail_msg: >-
+      No firewall named '{{ hetzner_firewall_name }}' exists (found:
+      {{ _hcf_current.json.firewalls | map(attribute='name') | list }}). This role reconciles an
+      EXISTING firewall and deliberately will not create one — attaching a new firewall to a live
+      public server is how a host loses SSH, so that stays a console action.
+    success_msg: "Firewall '{{ hetzner_firewall_name }}' found."
+    quiet: true
+
+- name: Summarise the change
+  vars:
+    _live: >-
+      {{ (_hcf_match | first).rules | map('dict2items')
+         | map('selectattr', 'key', 'in', ['direction', 'protocol', 'port'])
+         | map('items2dict') | list }}
+    _want: >-
+      {{ hetzner_firewall_rules | map('dict2items')
+         | map('selectattr', 'key', 'in', ['direction', 'protocol', 'port'])
+         | map('items2dict') | list }}
+  ansible.builtin.debug:
+    msg:
+      - "firewall : {{ hetzner_firewall_name }} (id {{ (_hcf_match | first).id }})"
+      - "applied to: {{ (_hcf_match | first).applied_to | map(attribute='server') | map(attribute='id') | list }}"
+      - "LIVE  : {{ _live }}"
+      - "WANTED: {{ _want }}"
+      - "REMOVED: {{ _live | difference(_want) }}"
+      - "ADDED  : {{ _want | difference(_live) }}"
+      - "{{ 'DRY RUN — nothing changed. Re-run with hetzner_firewall_apply=true.' if not (hetzner_firewall_apply | bool) else 'APPLYING — this REPLACES the whole
+        rule set.' }}"
+
+- name: Apply the declared rule set
+  # set_rules replaces every rule in one call, so there is no window where the firewall is
+  # half-configured — no moment with SSH removed and not yet re-added.
+  ansible.builtin.uri:
+    url: "https://api.hetzner.cloud/v1/firewalls/{{ (_hcf_match | first).id }}/actions/set_rules"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ hetzner_api_token }}"
+    body_format: json
+    body:
+      rules: "{{ hetzner_firewall_rules }}"
+    status_code: [201, 200]
+  register: _hcf_set
+  changed_when: true
+  delegate_to: localhost
+  no_log: true
+  when: hetzner_firewall_apply | bool
+
+- name: Read the rules back
+  # A read-back, not a trust of the POST's 201. The whole risk is a rule set that ended up
+  # different from what was intended.
+  ansible.builtin.uri:
+    url: "https://api.hetzner.cloud/v1/firewalls"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ hetzner_api_token }}"
+    status_code: [200]
+  register: _hcf_after
+  changed_when: false
+  check_mode: false
+  delegate_to: localhost
+  no_log: true
+  when: hetzner_firewall_apply | bool
+
+- name: HARD GATE — the live rules must match what was declared
+  vars:
+    _after: >-
+      {{ (_hcf_after.json.firewalls | selectattr('name', 'eq', hetzner_firewall_name) | first).rules
+         | map('dict2items') | map('selectattr', 'key', 'in', ['direction', 'protocol', 'port'])
+         | map('items2dict') | list }}
+    _want: >-
+      {{ hetzner_firewall_rules | map('dict2items')
+         | map('selectattr', 'key', 'in', ['direction', 'protocol', 'port'])
+         | map('items2dict') | list }}
+  ansible.builtin.assert:
+    that:
+      - "_want | difference(_after) | length == 0"
+      - "_after | difference(_want) | length == 0"
+    fail_msg: >-
+      The live rule set does not match the declaration. Missing: {{ _want | difference(_after) }}.
+      Unexpected: {{ _after | difference(_want) }}.
+    success_msg: "Live rules match the declaration ({{ _after | length }} rules)."
+    quiet: true
+  when: hetzner_firewall_apply | bool

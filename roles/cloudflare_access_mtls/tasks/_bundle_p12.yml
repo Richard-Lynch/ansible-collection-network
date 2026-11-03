@@ -1,0 +1,145 @@
+---
+# Build a PKCS#12 bundle for iOS import, for one client. Included from _issue_one_client.yml.
+#
+# WHY A PASSWORD AT ALL, AND WHY A GENERATED ONE.
+#   iOS will not import a .p12 without one, and the bundle contains the client PRIVATE KEY — so it
+#   travels (AirDrop, email) as a file that is only as safe as its password. A fixed password
+#   shared by every bundle (as hand-rolled scripts commonly use) makes it decorative: anyone
+#   intercepting the bundle has the key. So the password is generated per client and stored in
+#   1Password alongside the key, and the human reads it from there when iOS prompts during install.
+
+- name: "Generate and store the .p12 import password for {{ client.name }}"
+  # secrets_manager `ensure` with no value generates a strong random one and never overwrites an
+  # existing item — so a re-run reuses the same password rather than creating a bundle whose
+  # password no longer matches what is stored.
+  ansible.builtin.include_role:
+    name: richard_lynch.common.secrets_manager
+    apply:
+      no_log: true
+  vars:
+    secrets_manager_action: ensure
+    secrets_manager_title: "{{ _c_1p_p12pw }}"
+    secrets_manager_vault: "{{ cloudflare_access_mtls_vault }}"
+    secrets_manager_generate_length: 24
+    secrets_manager_result_var: _c_p12_password
+    secrets_manager_notes: >-
+      Import password for the iOS PKCS#12 bundle of Cloudflare Access mTLS client
+      '{{ client.name }}' (CN={{ client.common_name }}). iOS prompts for this when installing the
+      .p12 profile. The bundle contains the client PRIVATE KEY, so this password is what protects
+      it in transit to the device — it is generated per client rather than shared. Created by
+      the cloudflare_access_mtls role.
+
+- name: "Read back the generated .p12 password for {{ client.name }}"
+  # Read from 1Password rather than trusting the role's returned fact, so the bundle is built with
+  # the value that is actually STORED. If these ever disagreed, the bundle would be unopenable
+  # with the recorded password — a failure only discovered at the device.
+  ansible.builtin.set_fact:
+    _c_p12_pw: >-
+      {{ lookup('richard_lynch.common.onepassword_cached', _c_1p_p12pw,
+                field='password', vault=cloudflare_access_mtls_vault) }}
+  no_log: true
+
+- name: "HARD GATE — the .p12 password must be non-empty for {{ client.name }}"
+  # An empty password here would produce a bundle iOS silently refuses, or one with no protection
+  # at all. Either way the cause (a failed 1Password read) must not be inferred from the device.
+  ansible.builtin.assert:
+    that:
+      - _c_p12_pw | default('') | length > 0
+    fail_msg: >-
+      The .p12 import password for '{{ client.name }}' read back empty from 1Password item
+      '{{ _c_1p_p12pw }}'. Refusing to build an unprotected bundle containing a private key.
+    quiet: true
+
+- name: "Bundle {{ client.name }} as PKCS#12 for iOS"
+  # The password is read from the ENVIRONMENT, not from argv: argv is visible to any other process
+  # on the controller via ps, so a literal there would leak the one thing protecting the private
+  # key in the bundle.
+  #
+  # `env:MTLS_P12_PW`, NOT `pass:env:MTLS_P12_PW`. `pass:` and `env:` are two DIFFERENT OpenSSL
+  # pass-phrase sources, and `pass:` takes EVERYTHING after its colon as the literal passphrase —
+  # so `pass:env:MTLS_P12_PW` set the password to the 15-character string "env:MTLS_P12_PW" and
+  # never read the environment at all. The bundle then opens with that literal and REJECTS the
+  # real generated password, i.e. a private key protected by a constant visible in the source,
+  # and the device refuses the correct password at install.
+  #
+  # -certfile includes the CA cert so iOS can present a complete chain.
+  ansible.builtin.command:
+    cmd: >-
+      openssl pkcs12 -export
+      -inkey {{ _c_key | quote }}
+      -in {{ _c_crt | quote }}
+      -certfile {{ _mtls_ca_crt | quote }}
+      -out {{ _c_p12 | quote }}
+      -name {{ client.name | quote }}
+      -passout env:MTLS_P12_PW
+    creates: "{{ _c_p12 }}"
+  environment:
+    MTLS_P12_PW: "{{ _c_p12_pw }}"
+  no_log: true
+
+- name: "Tighten the bundle's mode for {{ client.name }}"
+  ansible.builtin.file:
+    path: "{{ _c_p12 }}"
+    mode: "0600"
+
+- name: "VERIFY — the bundle opens with the stored password for {{ client.name }}"
+  # Proves the artefact AND the recorded password together. Without this, a mismatch between the
+  # bundle and the 1Password item surfaces as "iOS rejects the file" with no way to tell whether
+  # the bundle, the password or the device is at fault.
+  ansible.builtin.command:
+    cmd: >-
+      openssl pkcs12 -in {{ _c_p12 | quote }} -noout
+      -passin env:MTLS_P12_PW
+  environment:
+    MTLS_P12_PW: "{{ _c_p12_pw }}"
+  register: _c_p12_check
+  changed_when: false
+  no_log: true
+
+- name: "VERIFY (NEGATIVE) — the bundle must REJECT a wrong password for {{ client.name }}"
+  # ==========================================================================================
+  # THIS IS THE CHECK WHOSE ABSENCE LET A REAL BUG SHIP, and it matters more than the positive
+  # one above.
+  #
+  # The export and the verify originally used the SAME wrong syntax (`pass:env:...`), so the
+  # positive check passed — it proved the two sides AGREED, which they did: both used the
+  # literal string "env:MTLS_P12_PW". A positive-only check passes identically whether the
+  # password is the generated secret or a hardcoded constant, so it can never detect that the
+  # bundle is protected by the wrong value. It is a guard that cannot fail for the reason you
+  # care about.
+  #
+  # A wrong password MUST fail. If this task succeeds, the bundle either has no password or has
+  # one that is not the recorded secret — both mean the private key inside is unprotected.
+  # ==========================================================================================
+  ansible.builtin.command:
+    cmd: >-
+      openssl pkcs12 -in {{ _c_p12 | quote }} -noout
+      -passin pass:__deliberately_wrong_password__
+  register: _c_p12_negative
+  changed_when: false
+  failed_when: false
+
+- name: "HARD GATE — a wrong password must NOT open the bundle for {{ client.name }}"
+  ansible.builtin.assert:
+    that:
+      - _c_p12_negative.rc != 0
+    fail_msg: >-
+      The PKCS#12 bundle for '{{ client.name }}' OPENED with a deliberately wrong password, so it
+      is not protected by the secret recorded in 1Password ('{{ _c_1p_p12pw }}'). The bundle
+      contains the client PRIVATE KEY and travels to the device as a file, so this is an
+      unprotected key. Delete {{ _c_p12 }} and re-run. (Known cause: `-passout pass:env:VAR` sets
+      the password to the literal string "env:VAR" — `pass:` and `env:` are different OpenSSL
+      sources and the correct form is a bare `env:VAR`.)
+    success_msg: >-
+      Confirmed: '{{ client.name }}' bundle opens with the stored password and REJECTS a wrong
+      one — so it is genuinely protected by the secret in 1Password.
+    quiet: true
+
+- name: "Report the bundle and the manual hop for {{ client.name }}"
+  ansible.builtin.debug:
+    msg: >-
+      PKCS#12 bundle for '{{ client.name }}' written to {{ _c_p12 }} (mode 0600, gitignored) and
+      verified to open with the password stored in 1Password as '{{ _c_1p_p12pw }}'.
+      MANUAL: AirDrop or email this file to the device, install it, then trust it in
+      iOS Settings -> General -> VPN & Device Management. iOS prompts for the import password —
+      read it from that 1Password item. This hop has no API and is not automated.

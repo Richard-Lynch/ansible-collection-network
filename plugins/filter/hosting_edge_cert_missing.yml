@@ -1,0 +1,28 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_cert_missing
+  short_description: List the hosts not named by an active certificate pack
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - 'Only a pack whose C(status) is C(active) counts, and a host must be named by it exactly (case-insensitive):
+      a Universal certificate for C(*.example.com) does not cover C(x.dev.example.com).'
+  options:
+    _input:
+      description: Certificate packs as the Cloudflare API returns them (C(status), C(hosts)).
+      type: list
+      required: true
+    hosts:
+      description: The hosts that must be covered.
+      type: list
+      required: true
+EXAMPLES: |
+  - name: Every wildcard is named by an active pack
+    ansible.builtin.assert:
+      that:
+        - (packs | richard_lynch.network.hosting_edge_cert_missing(['*.dev.example.com'])) == []
+RETURN:
+  _value:
+    description: The uncovered hosts, in input order.
+    type: list

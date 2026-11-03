@@ -1,0 +1,37 @@
+---
+# converge.yml asserts as it goes (the filters are pure, so there is no artifact to inspect). This
+# verify re-proves the one property the converge cannot see from inside itself: that every filter
+# the role's tasks call is defined by the collection's hosting_edge filter plugin.
+- name: Verify — the filter plugin defines every filter the role calls
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _plugin_path: "{{ playbook_dir }}/../../../../plugins/filter/hosting_edge.py"
+  tasks:
+    - name: Find the filter plugin
+      ansible.builtin.stat:
+        path: "{{ _plugin_path }}"
+      register: _plugin
+
+    - name: It exists
+      ansible.builtin.assert:
+        that:
+          - _plugin.stat.exists
+        fail_msg: "filter plugin not found at {{ _plugin_path }}"
+        quiet: true
+
+    - name: Every hosting_edge_ filter the tasks call is defined by the plugin
+      ansible.builtin.assert:
+        that:
+          - _called | length > 0
+          - _called | difference(_defined) | length == 0
+        fail_msg: "tasks call filters the plugin does not define: {{ _called | difference(_defined) }}"
+        quiet: true
+      vars:
+        _src: "{{ lookup('ansible.builtin.file', _plugin_path) }}"
+        _defined: "{{ _src | regex_findall('\"(hosting_edge_[a-z_]+)\":') | unique | list }}"
+        _tasks: >-
+          {{ lookup('ansible.builtin.file', playbook_dir ~ '/../../tasks/main.yml')
+             ~ lookup('ansible.builtin.file', playbook_dir ~ '/../../tasks/apply.yml')
+             ~ lookup('ansible.builtin.file', playbook_dir ~ '/../../tasks/acm.yml') }}
+        _called: "{{ _tasks | regex_findall('[|]\\s*(?:\\w+[.]\\w+[.])?(hosting_edge_[a-z_]+)') | unique | list }}"

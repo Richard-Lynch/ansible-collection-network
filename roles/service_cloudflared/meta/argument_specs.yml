@@ -1,0 +1,82 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_cloudflared/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_cloudflared
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Deploy a Cloudflare Tunnel client (cloudflared)
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflared_container_name:
+        description:
+          - Container name. Give every host running its own cloudflared instance a
+          - DISTINCT name (and cloudflared_config_dir) when the role is deployed more
+          - than once, each instance with its own tunnel token pointing at a different
+          - Cloudflare Tunnel.
+        type: str
+        required: false
+        default: cloudflared-tunnel
+      cloudflared_image:
+        description:
+          - Image, PINNED to a specific tag — never 'latest', so an upgrade is a reviewed change.
+        type: str
+        required: false
+        default: cloudflare/cloudflared:2025.7.0
+      cloudflared_config_dir:
+        description:
+          - Directory holding the compose file on the target host. Must be unique per
+          - cloudflared instance if a host runs more than one.
+        type: str
+        required: false
+        default: /opt/cloudflared
+      cloudflared_network_mode:
+        description:
+          - Docker network mode. `host` is REQUIRED when the tunnel's ingress points
+          - at a service on the HOST's loopback (e.g. http://127.0.0.1:3001) — on a
+          - bridge network `localhost` means the cloudflared container itself and
+          - every request 502s. Tunnels that reach their origin by DNS name
+          - (https://proxy.example.com) do not need it, so bridge is the default.
+        type: str
+        required: false
+        default: bridge
+        choices:
+          - bridge
+          - host
+      cloudflared_protocol:
+        description:
+          - Edge transport. `quic` is cloudflared's default and works on most networks,
+          - 'but on some paths EVERY dial fails with "timeout: no recent network activity"'
+          - while TCP and UDP 7844 to the same edge IPs are reachable — the symptom of a
+          - path MTU too small for QUIC's datagrams. Set this to `http2` per host where
+          - that happens; it uses the TCP/7844 path that already works.
+        type: str
+        required: false
+        default: quic
+        choices:
+          - quic
+          - http2
+          - auto
+      cloudflared_tunnel_token:
+        description:
+          - 'Cloudflare Tunnel token for THIS instance, from a secret store. No default:'
+          - an empty or placeholder-looking value is rejected by an assert before
+          - anything is rendered. Every cloudflared instance should use its own distinct
+          - tunnel/token; never reuse the token from another instance.
+        type: str
+        required: true
+        no_log: true
+      cloudflared_deploy:
+        description:
+          - Whether to actually converge the compose stack. Set false to STAGE config
+          - only (render the compose file, do not start the container) — used during
+          - parallel-build cutovers where a second running replica would make Cloudflare
+          - load-balance live traffic to a not-yet-cut-over host.
+        type: bool
+        required: false
+        default: true

@@ -1,0 +1,35 @@
+# Offline scenario — no Cloudflare account, no CA, no 1Password.
+#
+# WHY CHECK/PARSE RATHER THAN A CONVERGE. A full converge of this role would mint a REAL CA on the
+# REAL Cloudflare account and write REAL 1Password items — the one thing a test must never do, and
+# not reproducible in CI besides. So this scenario exercises the parts that are pure computation:
+# the declared-client VALIDATION and the already-issued/to-issue SPLIT, which is where a bug would
+# actually hide (a wrong split either reissues a live device's certificate or silently skips a new
+# one). Honest partial coverage.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # Molecule runs from the scenario directory, so ansible.cfg's roles_path does not apply. Pointed
+  # at the roles directory so converge.yml can include the role under test.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # Two trees: installed dependency collections, then the collection this role belongs to.
+    # Set explicitly because molecule does not inherit ansible.cfg's collections_path.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible
+scenario:
+  test_sequence: [syntax, converge, verify, idempotence]

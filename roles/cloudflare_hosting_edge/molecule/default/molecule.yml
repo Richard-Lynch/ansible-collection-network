@@ -1,0 +1,17 @@
+---
+dependency: { name: galaxy }
+driver: { name: default }
+platforms: [{ name: localhost }]
+provisioner:
+  name: ansible
+  inventory: { host_vars: { localhost: { ansible_connection: local } } }
+  # Molecule does not inherit ansible.cfg. The filters under test are collection plugins, so the
+  # collection's own tree must be on the collections path: a converge that cannot find its filter
+  # would fail every case for the wrong reason (the cases assert the REASON).
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  playbooks: { converge: converge.yml, verify: verify.yml }
+verifier: { name: ansible }
+scenario:
+  test_sequence: [syntax, converge, verify]

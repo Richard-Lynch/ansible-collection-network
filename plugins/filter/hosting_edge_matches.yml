@@ -1,0 +1,31 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_matches
+  short_description: Report whether a hostname pattern covers a hostname
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - A C(*.x.y) pattern covers any name below C(x.y) at any depth, as Cloudflare Access and DNS treat a
+      wildcard, but not C(x.y) itself.
+    - A non-wildcard pattern covers only the identical name. Comparison is case-insensitive; a path after
+      the host (C(app.example.com/api)) is ignored.
+  options:
+    _input:
+      description: The pattern, for example C(*.dev.example.com).
+      type: str
+      required: true
+    host:
+      description: The hostname to test.
+      type: str
+      required: true
+EXAMPLES: |
+  - name: A wildcard covers a deeper name but not its own apex
+    ansible.builtin.assert:
+      that:
+        - "'*.dev.example.com' | richard_lynch.network.hosting_edge_matches('a.b.dev.example.com')"
+        - "not ('*.dev.example.com' | richard_lynch.network.hosting_edge_matches('dev.example.com'))"
+RETURN:
+  _value:
+    description: True when the pattern covers the host.
+    type: bool

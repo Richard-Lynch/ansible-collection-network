@@ -1,0 +1,35 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_public_endpoint/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_public_endpoint
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# CNAME (to traefik) or A. A name cannot hold both — the role reads the live record first and refuses a collision, because bind9 responds to one by refusing to load the ENTIRE zone.
+endpoint_record_type__default: CNAME
+
+# Publish through Cloudflare. Defaults FALSE: an unpublished service is a nuisance, an accidentally-published machine interface is not.
+endpoint_public__default: false
+
+# Which tunnel publishes it: a key of endpoint_tunnel_ids. Required (and checked against that map) when endpoint_public.
+endpoint_tunnel__default: ''
+
+# Cloudflare Tunnel ids by name, {name: uuid}. The caller names a tunnel, never pastes an id per service: a typo in a name fails the gate, a typo in an id could publish onto the wrong tunnel.
+endpoint_tunnel_ids__default: {}
+
+# Generate-don't-apply. Reports the diff and changes nothing unless true.
+endpoint_apply__default: false
+
+# DNS labels that mark a zone as machine-owned (written by DHCP-driven updates or service registration, never by hand). endpoint_zone may not contain any of them as a label: with ['dyn'], dyn.example.com and a.dyn.example.com are refused. Empty (the default) refuses nothing.
+endpoint_machine_zone_labels__default: []
+
+# cloudflared originRequest options for a NEW ingress entry. Defaults to noTLSVerify: false — the tunnel talks HTTPS to traefik, which presents a real certificate. An existing entry is carried through unchanged.
+endpoint_origin_request__default:
+  noTLSVerify: false
+
+# Which half to reconcile. The halves can run on different hosts — the internal record edits zone files and must run ON the DNS server, while the Cloudflare half is pure API from the controller — so a caller split across two plays selects one at a time.
+endpoint_do__default: both

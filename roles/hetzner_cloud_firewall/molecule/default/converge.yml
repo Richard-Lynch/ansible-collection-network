@@ -1,0 +1,240 @@
+# Exercise the REAL role's guards against deliberately-bad declarations.
+#
+# NO API CALL IS EVER MADE. Every case below is refused by a guard, and the guards run BEFORE the
+# first `uri` task in tasks/main.yml — so the fake token is never sent anywhere. The one positive
+# case sets hetzner_firewall_apply=false and is expected to fail at the API read, which is proof
+# the guards PASSED and control reached the network stage; that distinction is asserted in verify.
+#
+# Each rescue records the NAME OF THE TASK THAT FAILED, not a bare FIRED/NOT FIRED. That distinction
+# is the whole validity of this file: with a bare flag, a disabled guard lets the case run on to the
+# API call, which then fails on the fake token, and `rescue` records "FIRED" anyway — the scenario
+# passes with the guard switched off. Proven by sabotage: replacing the lockout guard's condition
+# with `true` left this file GREEN until the assertions checked WHICH task refused.
+---
+- name: Converge
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Never a real credential. The guards refuse before any request is built, so this value is
+    # never transmitted — but it is still obviously-fake rather than a plausible-looking token, so
+    # nobody reading a failure log wonders whether a real secret leaked into CI.
+    _fake_token: "FAKE_HCLOUD_TOKEN_NOT_REAL"
+
+    # A MINIMAL VALID declaration. Every negative case below is this, with exactly one thing wrong,
+    # so a guard firing can only be attributable to that one change.
+    _valid_rules:
+      - direction: in
+        protocol: tcp
+        port: "22"
+        source_ips: ["0.0.0.0/0", "::/0"]
+        description: "SSH — the only access path to this host"
+
+  tasks:
+    - name: "NEGATIVE — omitting a required inbound port must be refused (THE LOCKOUT GUARD)"
+      # The most important test in this file. set_rules REPLACES the whole rule set, so a
+      # declaration without port 22 does not leave SSH alone — it DELETES it, on a host reachable
+      # only by SSH. If this guard ever stops firing, the failure is unrecoverable without the
+      # provider console.
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            # OTHERWISE FULLY VALID: description present, direction/protocol legal, source_ips
+            # set. The ONLY defect is the absent inbound TCP 22, so the lockout guard is the only
+            # thing that can refuse it.
+            #
+            # This matters more than it looks. An earlier version used a rule with no description,
+            # so when the lockout guard was deliberately sabotaged the DESCRIPTION guard refused
+            # the case instead, block/rescue still recorded "FIRED", and the scenario passed with
+            # the lockout guard disabled — green through the exact regression it exists to catch.
+            # Verified by sabotage: with `_missing | length == 0` replaced by `true`, this file now
+            # fails.
+            hetzner_firewall_rules:
+              - direction: in
+                protocol: udp
+                port: "51820"
+                source_ips: ["0.0.0.0/0"]
+                description: "WireGuard — valid in every respect except that SSH is missing"
+        - name: "Record that the lockout (missing port 22) guard did NOT fire"
+          ansible.builtin.set_fact:
+            _guard_lockout: "NOT FIRED — the role accepted it"
+      rescue:
+        - name: "Record which task refused the lockout (missing port 22) case"
+          ansible.builtin.set_fact:
+            _guard_lockout: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - name: "NEGATIVE — a rule with no description must be refused"
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            hetzner_firewall_rules:
+              - direction: in
+                protocol: tcp
+                port: "22"
+                source_ips: ["0.0.0.0/0"]
+                # description deliberately absent
+        - name: "Record that the missing description guard did NOT fire"
+          ansible.builtin.set_fact:
+            _guard_desc: "NOT FIRED — the role accepted it"
+      rescue:
+        - name: "Record which task refused the missing description case"
+          ansible.builtin.set_fact:
+            _guard_desc: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - name: "NEGATIVE — an empty description must ALSO be refused, not just a missing one"
+      # A separate case because `rejectattr('description', 'defined')` and the empty-string check
+      # are two different conditions in the guard; a regression could plausibly drop either one.
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            hetzner_firewall_rules:
+              - direction: in
+                protocol: tcp
+                port: "22"
+                source_ips: ["0.0.0.0/0"]
+                description: ""
+        - name: "Record that the empty description guard did NOT fire"
+          ansible.builtin.set_fact:
+            _guard_desc_empty: "NOT FIRED — the role accepted it"
+      rescue:
+        - name: "Record which task refused the empty description case"
+          ansible.builtin.set_fact:
+            _guard_desc_empty: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - name: "NEGATIVE — an invalid direction must be refused"
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            # Carries a VALID inbound 22 rule as well, so the lockout guard is satisfied and the
+            # direction guard is the one under test. Without it, `direction: inbound` means no rule
+            # counts as inbound TCP 22, the lockout guard fires first, and this case silently
+            # tests the wrong guard while still going green.
+            hetzner_firewall_rules:
+              - direction: in
+                protocol: tcp
+                port: "22"
+                source_ips: ["0.0.0.0/0"]
+                description: "SSH — valid, present so the lockout guard is not the one that fires"
+              - direction: inbound      # not 'in' — the API and a human reader both accept it silently
+                protocol: tcp
+                port: "443"
+                source_ips: ["0.0.0.0/0"]
+                description: "typo'd direction"
+        - name: "Record that the invalid direction guard did NOT fire"
+          ansible.builtin.set_fact:
+            _guard_direction: "NOT FIRED — the role accepted it"
+      rescue:
+        - name: "Record which task refused the invalid direction case"
+          ansible.builtin.set_fact:
+            _guard_direction: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - name: "NEGATIVE — an inbound rule with no source_ips must be refused"
+      # Such a rule is accepted by the API and matches NOTHING, so it reads as protection that does
+      # not exist — the worst kind of firewall rule.
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            # Same reasoning as the direction case above: keep a valid 22 rule so the guard under
+            # test is the source_ips one, not the lockout guard.
+            hetzner_firewall_rules:
+              - direction: in
+                protocol: tcp
+                port: "22"
+                source_ips: ["0.0.0.0/0"]
+                description: "SSH — valid, keeps the lockout guard quiet"
+              - direction: in
+                protocol: tcp
+                port: "8080"
+                description: "no source_ips — matches nothing"
+        - name: "Record that the inbound without source_ips guard did NOT fire"
+          ansible.builtin.set_fact:
+            _guard_scope: "NOT FIRED — the role accepted it"
+      rescue:
+        - name: "Record which task refused the inbound without source_ips case"
+          ansible.builtin.set_fact:
+            _guard_scope: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    - name: "POSITIVE — a valid declaration must PASS every guard and reach the API stage"
+      # Without this, every assertion in verify.yml could be satisfied by a role that refuses
+      # unconditionally — the guards would look perfect while the role was entirely broken.
+      #
+      # It still ends in a failure, because the next thing the role does is call the real Hetzner
+      # API with a fake token. That is the intended outcome and verify.yml distinguishes the two:
+      # reaching the network means the guards let it through.
+      block:
+        - name: Call the role
+          ansible.builtin.include_role:
+            name: hetzner_cloud_firewall
+          vars:
+            hetzner_api_token: "{{ _fake_token }}"
+            hetzner_firewall_name: "molecule-not-a-real-firewall"
+            hetzner_firewall_apply: false
+            hetzner_firewall_rules: "{{ _valid_rules }}"
+        - name: Record that a valid declaration completed
+          ansible.builtin.set_fact:
+            _valid_outcome: "PASSED GUARDS AND COMPLETED"
+      rescue:
+        - name: Record where a valid declaration stopped
+          ansible.builtin.set_fact:
+            # `ansible_failed_task.name` names the task that actually failed. A guard failure names
+            # a GUARD task; an API failure names the uri task — which is how verify tells apart
+            # "the guards refused a valid declaration" from "the guards passed it through".
+            _valid_outcome: "{{ ansible_failed_task.name | default('unknown') }}"
+
+    # NOTE ON STATE LEAKAGE: `include_role` + `vars:` sets facts that OUTLIVE the block, so a case
+    # that omits a variable silently inherits the previous case's value. Every case above therefore
+    # sets all four role variables explicitly rather than relying on defaults — which is also why
+    # each negative fixture carries its own valid port-22 rule instead of assuming one is in scope.
+
+    # Molecule runs verify.yml as a SEPARATE PLAYBOOK, so facts set here do not reach it — the
+    # first version asserted on them there and died with "'_guard_lockout' is undefined". Writing
+    # the results to a file and reading them back in verify is the same seam
+    # richard_lynch.network.service_wireguard_peer/molecule uses, for the same reason.
+    - name: Persist the guard outcomes for verify.yml
+      ansible.builtin.copy:
+        dest: /tmp/molecule-hcf-guards.json
+        mode: "0644"
+        content: |
+          {{ {
+               'lockout': _guard_lockout,
+               'desc': _guard_desc,
+               'desc_empty': _guard_desc_empty,
+               'direction': _guard_direction,
+               'scope': _guard_scope,
+               'valid_outcome': _valid_outcome,
+             } | to_nice_json }}
+
+    - name: Report what happened
+      ansible.builtin.debug:
+        msg:
+          - "lockout (missing port 22) : {{ _guard_lockout }}"
+          - "missing description       : {{ _guard_desc }}"
+          - "empty description         : {{ _guard_desc_empty }}"
+          - "invalid direction         : {{ _guard_direction }}"
+          - "inbound without source_ips: {{ _guard_scope }}"
+          - "valid declaration         : {{ _valid_outcome }}"

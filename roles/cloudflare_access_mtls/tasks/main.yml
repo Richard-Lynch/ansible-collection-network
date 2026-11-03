@@ -1,0 +1,17 @@
+---
+# Dispatcher. Every entrypoint can also be called directly with `tasks_from:` on an
+# include_role/import_role — note `tasks_from:` is NOT honoured in a `roles:` list, where it
+# silently becomes a role PARAMETER and the role runs `main` instead.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Shared setup (API headers, workdir, live CA state)
+  ansible.builtin.include_tasks: setup_vars.yml
+
+- name: Dispatch on the requested action
+  ansible.builtin.include_tasks: "{{ cloudflare_access_mtls_action }}.yml"
+  when: cloudflare_access_mtls_action != 'report'
+
+- name: Report (always, and the only thing `report` does)
+  ansible.builtin.include_tasks: report.yml

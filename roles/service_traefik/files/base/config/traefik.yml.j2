@@ -1,0 +1,82 @@
+---
+api:
+  insecure: false
+  dashboard: true
+
+entryPoints:
+  web:
+    address: :80
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+{# insecureSkipVerify (traefik_servers_insecure_skip_verify) disables TLS verification for EVERY
+   https upstream. It exists for backends with self-signed certificates; prefer per-service
+   transports (loadBalancer.serversTransport) or trusting their CAs via serversTransport.rootCAs, so
+   verification stays on for everything else. #}
+serversTransport:
+  insecureSkipVerify: {{ traefik_servers_insecure_skip_verify | bool | lower }}
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+{# LOG VOLUME: these two blocks are not cosmetic.
+
+   DEBUG plus an access log that keeps every field and every header produces a very large volume
+   of log output on a busy proxy, and sustained log I/O degrades the host in ways that do not look
+   like logging. `addInternals: true` additionally logs Traefik's own internal traffic, which at
+   DEBUG includes its config echo, so a log search for a service name matches Traefik describing
+   the service rather than serving it.
+
+   Rotation: a daemon-wide default in /etc/docker/daemon.json applies only to containers created
+   AFTER it was set, so the compose project sets the limit on this service explicitly (see
+   docker-compose.yml).
+
+   INFO is the right level for a proxy that is working. Set DEBUG deliberately and briefly when
+   diagnosing a routing problem, and put it back; if the access log is shipped to a log store, a
+   kept-every-header JSON line is also the most expensive possible shape there. #}
+log:
+  level: INFO
+
+accesslog:
+  # addInternals deliberately OFF: traefik's own internal requests are noise in a route-level
+  # access log, and at DEBUG they include the config echo.
+  addInternals: false
+  format: json # or 'common'
+  fields:
+    defaultMode: keep
+    # names:
+    #   ClientUsername: drop
+    headers:
+{# `drop`, not `keep`: keeping every header on every request multiplies the access log's volume,
+   and headers are where credentials live — an Authorization header kept here lands in the
+   container log and in any log store it is shipped to. `names:` below can re-add a specific header
+   when one is genuinely needed for diagnosis. (Column 0 on purpose: an indented comment tag would
+   leave its indentation in front of the next line.) #}
+      defaultMode: drop
+      # names:
+      #   User-Agent: redact
+      #   Authorization: drop
+      #   Content-Type: keep
+
+certificatesResolvers:
+  {{ traefik_acme_resolver }}:
+    # Enable ACME (Let's Encrypt): automatic SSL.
+    acme:
+      email: {{ traefik_acme_email }}
+      storage: /letsencrypt/acme.json
+      caServer: https://acme-v02.api.letsencrypt.org/directory # prod (default)
+      # caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "1.0.0.1:53"

@@ -1,0 +1,19 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/cloudflare_hosting_edge/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate cloudflare_hosting_edge
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Field of that item holding the token. API Credential items use credential, Password items use password.
+cloudflare_hosting_edge_token_field__default: credential
+
+# Generate-don't-apply. False reads, gates and reports; true writes and reads back.
+cloudflare_hosting_edge_apply__default: false
+
+# Access session length for the new apps.
+cloudflare_hosting_edge_session_duration__default: 24h

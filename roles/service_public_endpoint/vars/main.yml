@@ -1,0 +1,3 @@
+---
+# Derived values — not caller inputs, so they live here rather than in defaults.
+_cf_api: "https://api.cloudflare.com/client/v4"

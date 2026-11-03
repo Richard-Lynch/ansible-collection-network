@@ -1,0 +1,29 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_winner
+  short_description: Name the Access application that decides a hostname's root path
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - 'Most specific wins: an exact hostname beats any wildcard, and among wildcards the longer beats the
+      shorter.'
+    - Applications whose domain carries a path decide only that path, so they do not compete for C(/). Returns
+      null when no application covers the host.
+  options:
+    _input:
+      description: Access applications as the Cloudflare API returns them (C(name), C(domain), C(self_hosted_domains)).
+      type: list
+      required: true
+    host:
+      description: The hostname.
+      type: str
+      required: true
+EXAMPLES: |
+  - name: Which application decides a host
+    ansible.builtin.debug:
+      msg: "{{ access_apps | richard_lynch.network.hosting_edge_winner('hello.dev.example.com') }}"
+RETURN:
+  _value:
+    description: The winning application's name, or null.
+    type: str

@@ -1,0 +1,98 @@
+# Assert the split the role actually produced, then prove the guard can FAIL.
+#
+# The second half matters as much as the first: a new rule often false-positives or never fires on its
+# first run, so a test that only shows a guard passing has not shown it works.
+# A guard test needs both directions — a case that must FAIL and a
+# near-miss that must PASS.
+---
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloudflare_access_mtls_clients:
+      - name: phone-app
+        common_name: phone-app.chat.example.com
+        hostnames: [chat.example.com]
+        p12: true
+      - name: tablet-app
+        common_name: tablet-app.example.com
+        hostnames: [home.example.com]
+        p12: true
+      - name: never-checked
+        common_name: never-checked.example.com
+        hostnames: [chat.example.com]
+    _mtls_client_state:
+      phone-app: true
+      tablet-app: false
+
+  tasks:
+    - name: Run the real split
+      ansible.builtin.include_role:
+        name: cloudflare_access_mtls
+        tasks_from: _split_clients.yml
+
+    - name: The already-issued side holds exactly the client whose key is stored
+      # Asserts on NAMES, not counts: a count-only check passes if the split puts the wrong client
+      # on the wrong side, which is precisely the failure that reissues a live certificate.
+      ansible.builtin.assert:
+        that:
+          - (_mtls_clients_issued | map(attribute='name') | list) == ['phone-app']
+        fail_msg: >-
+          Expected only 'phone-app' (key present in the state map) to be treated as already
+          issued; got {{ _mtls_clients_issued | map(attribute='name') | list }}. A client wrongly
+          on this side is SKIPPED and never gets a certificate.
+        quiet: true
+
+    - name: The to-issue side holds the false entry AND the absent one
+      # `never-checked` is absent from the state map. It MUST land here — treating "I did not
+      # check" as "already issued" is the silent skip this assertion exists to catch.
+      ansible.builtin.assert:
+        that:
+          - (_mtls_clients_todo | map(attribute='name') | list | sort)
+            == ['never-checked', 'tablet-app']
+        fail_msg: >-
+          Expected 'tablet-app' (explicitly false) and 'never-checked' (absent from the
+          state map) to both be pending; got
+          {{ _mtls_clients_todo | map(attribute='name') | list }}. An absent name must fall on the
+          TODO side — the safe direction.
+        quiet: true
+
+    # ------------------------------------------------------------------------------------------
+    # The guard must be able to FAIL. A duplicate `name` is the declaration error that would
+    # overwrite one client's key material with another's and reissue a live certificate.
+    # ------------------------------------------------------------------------------------------
+    - name: A DUPLICATE declared name must be rejected
+      block:
+        - name: Run the split over a deliberately duplicated name
+          ansible.builtin.include_role:
+            name: cloudflare_access_mtls
+            tasks_from: _split_clients.yml
+          vars:
+            cloudflare_access_mtls_clients:
+              - name: phone-app
+                common_name: phone-app.chat.example.com
+              - name: phone-app
+                common_name: phone-app-SECOND.chat.example.com
+            _mtls_client_state:
+              phone-app: true
+
+        - name: Reaching here means the duplicate guard did not fire
+          ansible.builtin.fail:
+            msg: >-
+              _split_clients.yml ACCEPTED two clients sharing the name 'phone-app'. That guard
+              is the only thing standing between a duplicated declaration and one client's key
+              material overwriting another's — if this task runs, the guard is a silent one.
+      rescue:
+        - name: Confirm the failure was the duplicate-name assertion
+          # Checks WHY it failed, not merely that it did: a rescue that accepts any failure would
+          # go green on a typo in the fixture or a missing file, and would then be asserting
+          # nothing at all.
+          ansible.builtin.assert:
+            that:
+              - "'DUPLICATE' in (ansible_failed_result.msg | default(''))"
+            fail_msg: >-
+              The duplicate case failed, but not with the expected duplicate-name message —
+              got: {{ ansible_failed_result.msg | default('(no msg)') }}. The test is only
+              meaningful if it failed for the RIGHT reason.
+            success_msg: "Confirmed: a duplicate declared name is rejected by the role's own guard."
+            quiet: true

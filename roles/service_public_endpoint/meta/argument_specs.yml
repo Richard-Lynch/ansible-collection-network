@@ -1,0 +1,129 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_public_endpoint/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_public_endpoint
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: 'Publish one service: internal DNS, traefik, optional Cloudflare'
+    description:
+      - "Reconciles a single service's public-facing surface: an internal record in the"
+      - human-authored zone, a check for an existing traefik route, and — only when
+      - endpoint_public is true — a proxied Cloudflare DNS record plus an entry on the
+      - tunnel's ingress list.
+      - 'Human-authored names ONLY: it refuses to write into a zone the caller marks as'
+      - machine-owned (endpoint_machine_zone_labels), which is reserved for
+      - machine-registered names (DHCP-driven DNS updates and service registration).
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      endpoint_name:
+        description: Bare label, no dots. 'grafana' -> grafana.<endpoint_zone>.
+        type: str
+        required: true
+      endpoint_upstream:
+        description: Where traefik sends the request, e.g. http://monitoring.example.com:3000.
+        type: str
+        required: true
+      endpoint_zone:
+        description: The human-authored zone, e.g. example.com. A zone carrying any label in endpoint_machine_zone_labels is refused by a hard gate.
+        type: str
+        required: true
+      endpoint_record_type:
+        description: CNAME (to traefik) or A. A name cannot hold both — the role reads the live record first and refuses a collision, because bind9 responds to one by refusing to load the ENTIRE zone.
+        type: str
+        required: false
+        default: CNAME
+        choices:
+          - A
+          - CNAME
+      endpoint_cname_target:
+        description: Target FQDN when endpoint_record_type is CNAME (normally the reverse proxy's own name, e.g. traefik.example.com). Required for a CNAME.
+        type: str
+        required: false
+      endpoint_a_value:
+        description: IP when endpoint_record_type is A.
+        type: str
+        required: false
+      endpoint_public:
+        description: 'Publish through Cloudflare. Defaults FALSE: an unpublished service is a nuisance, an accidentally-published machine interface is not.'
+        type: bool
+        required: false
+        default: false
+      endpoint_tunnel:
+        description: 'Which tunnel publishes it: a key of endpoint_tunnel_ids. Required (and checked against that map) when endpoint_public.'
+        type: str
+        required: false
+        default: ''
+      endpoint_tunnel_ids:
+        description: 'Cloudflare Tunnel ids by name, {name: uuid}. The caller names a tunnel, never pastes an id per service: a typo in a name fails the gate, a typo in an id could publish onto the wrong tunnel.'
+        type: dict
+        required: false
+        default: {}
+      endpoint_tunnel_service:
+        description: The tunnel-side target — what cloudflared forwards to, NOT the traefik upstream (e.g. https://traefik.example.com). Required when endpoint_public.
+        type: str
+        required: false
+      endpoint_apply:
+        description: Generate-don't-apply. Reports the diff and changes nothing unless true.
+        type: bool
+        required: false
+        default: false
+      endpoint_bind9_addr:
+        description: Address of the authoritative server to read records back from.
+        type: str
+        required: true
+      endpoint_traefik_dynamic_dir:
+        description: "Absolute path, on the controller, of the traefik file-provider route directory. Scanned for an existing router of this name, which is never overwritten. It must exist: a scan of a missing directory finds nothing, which would read as 'no router' and defeat that protection."
+        type: str
+        required: true
+      endpoint_cf_account:
+        description: Cloudflare account id. Required when endpoint_public.
+        type: str
+        required: false
+      endpoint_cf_zone:
+        description: Cloudflare zone id of endpoint_zone. Required when endpoint_public.
+        type: str
+        required: false
+      endpoint_cf_api_token:
+        description: The Cloudflare API token itself, from whatever secret store the caller uses. When set it is used directly and endpoint_cf_token_item / endpoint_op_vault are ignored. Use a token scoped to DNS, tunnel and Access reads/edits, never one that can mint tokens. When endpoint_public, this or endpoint_cf_token_item plus endpoint_op_vault is required.
+        type: str
+        required: false
+        no_log: true
+      endpoint_cf_token_item:
+        description: "Alternative to endpoint_cf_api_token: the 1Password item holding the Cloudflare API token (field 'credential'), read through richard_lynch.common.onepassword_cached (needs the op CLI)."
+        type: str
+        required: false
+      endpoint_op_vault:
+        description: 1Password vault of endpoint_cf_token_item.
+        type: str
+        required: false
+      endpoint_machine_zone_labels:
+        description: "DNS labels that mark a zone as machine-owned (written by DHCP-driven updates or service registration, never by hand). endpoint_zone may not contain any of them as a label: with ['dyn'], dyn.example.com and a.dyn.example.com are refused. Empty (the default) refuses nothing."
+        type: list
+        required: false
+        default: []
+        elements: str
+      endpoint_origin_request:
+        description: 'cloudflared originRequest options for a NEW ingress entry. Defaults to noTLSVerify: false — the tunnel talks HTTPS to traefik, which presents a real certificate. An existing entry is carried through unchanged.'
+        type: dict
+        required: false
+        default:
+          noTLSVerify: false
+      endpoint_do:
+        description: Which half to reconcile. The halves can run on different hosts — the internal record edits zone files and must run ON the DNS server, while the Cloudflare half is pure API from the controller — so a caller split across two plays selects one at a time.
+        type: str
+        required: false
+        default: both
+        choices:
+          - both
+          - internal
+          - public
+      endpoint_dns_probe_host:
+        description: Optional host to run dig from, when the controller cannot reach bind9 directly.
+        type: str
+        required: false

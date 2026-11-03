@@ -1,0 +1,63 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/hetzner_cloud_firewall/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate hetzner_cloud_firewall
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Reconcile a Hetzner Cloud firewall to a declared rule set
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      hetzner_firewall_name:
+        description:
+          - Name of the existing Hetzner Cloud firewall to reconcile. The role
+          - 'REFUSES to create one: attaching a new firewall to a live server is how a'
+          - public host loses SSH, and it must be a deliberate console action.
+        type: str
+        required: true
+      hetzner_api_token:
+        description:
+          - Hetzner Cloud API token with firewall write scope. Supply it from a
+          - secret store or Ansible Vault; never hardcode it.
+        type: str
+        required: true
+        no_log: true
+      hetzner_firewall_rules:
+        description:
+          - The COMPLETE desired rule set. This is a REPLACE, not a merge — the
+          - Hetzner API's set_rules endpoint overwrites everything, so a rule omitted
+          - 'here is a rule deleted. That is deliberate: the repo is the source of'
+          - truth, and a merge would let console-added rules accumulate invisibly.
+          - ''
+          - 'Each entry:'
+          - "  direction   'in' or 'out'"
+          - '  protocol    tcp | udp | icmp | esp | gre'
+          - "  port        '22', '80-90', or 'any' (omit for icmp/esp/gre)"
+          - '  source_ips       list of CIDRs (direction: in)'
+          - '  destination_ips  list of CIDRs (direction: out)'
+          - "  description a human reason — REQUIRED by this role's guards, because a"
+          - '              rule nobody can justify is a rule nobody dares remove.'
+        type: list
+        required: true
+        elements: dict
+      hetzner_firewall_apply:
+        description:
+          - Generate-don't-apply. When false, reports the diff and changes nothing.
+        type: bool
+        required: false
+        default: false
+      hetzner_firewall_required_ports:
+        description:
+          - 'Inbound TCP ports that MUST remain open. Guarded before any write: this'
+          - role runs against a host reachable by exactly one path, and a rule set
+          - that omits SSH locks everyone out with no way back but the console.
+        type: list
+        required: false
+        default:
+          - 22
+        elements: int

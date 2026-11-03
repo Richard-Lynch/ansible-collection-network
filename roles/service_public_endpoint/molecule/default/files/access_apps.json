@@ -1,0 +1,10 @@
+{
+  "result": [
+    {"id": "app-wildcard", "name": "wildcard", "domain": "*.example.com", "type": "self_hosted"},
+    {"id": "app-bypass-a", "name": "Bypass A", "domain": "open-a.example.com", "type": "self_hosted"},
+    {"id": "app-bypass-b", "name": "Bypass B", "domain": "open-b.example.com", "type": "self_hosted"},
+    {"id": "app-multi", "name": "Multi", "domain": "multi-1.example.com",
+     "self_hosted_domains": ["multi-1.example.com", "multi-2.example.com"], "type": "self_hosted"},
+    {"id": "app-unread", "name": "Unreadable", "domain": "unread.example.com", "type": "self_hosted"}
+  ]
+}

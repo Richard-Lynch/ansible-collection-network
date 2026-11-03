@@ -1,0 +1,49 @@
+# Render the frps templates into a temp dir (no live host) so verify.yml can assert on them.
+---
+- name: Converge (render-only)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../defaults/main.yml"   # load the role's real defaults
+  tasks:
+    - name: Override render location + test inputs (higher precedence than defaults)
+      ansible.builtin.set_fact:
+        frp_token: "TEST_TOKEN_NOT_REAL"
+        frp_deploy_dir: "/tmp/molecule-frp-render"
+        frp_dashboard_enabled: false
+
+    # The role's OWN guard file, not a copy: a placeholder or short token must be refused, a real
+    # one accepted. A guard that stopped firing turns this run red rather than green.
+    - name: Guard probes — each must be REFUSED
+      ansible.builtin.include_tasks: _expect_guard_refusal.yml
+      loop:
+        - {label: placeholder token, vars: {frp_token: CHANGEME_FROM_A_SECRET_STORE}}
+        - {label: replace-me token, vars: {frp_token: replace-me-with-a-real-token}}
+        - {label: short token, vars: {frp_token: short}}
+        - {label: dashboard without password, vars: {frp_token: TEST_TOKEN_NOT_REAL, frp_dashboard_enabled: true}}
+        - label: dashboard placeholder password
+          vars: {frp_token: TEST_TOKEN_NOT_REAL, frp_dashboard_enabled: true, frp_dashboard_pwd: CHANGEME_PASSWORD}
+      loop_control:
+        loop_var: _probe
+        label: "{{ _probe.label }}"
+
+    - name: Guards ACCEPT a real token (dashboard off)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_guards.yml"
+
+    - name: Ensure render dir exists
+      ansible.builtin.file:
+        path: "{{ frp_deploy_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render frps.ini from the role template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../templates/frps.ini.j2"
+        dest: "{{ frp_deploy_dir }}/frps.ini"
+        mode: "0600"
+
+    - name: Render docker-compose from the role template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../templates/docker-compose.yml.j2"
+        dest: "{{ frp_deploy_dir }}/docker-compose.yml"
+        mode: "0644"

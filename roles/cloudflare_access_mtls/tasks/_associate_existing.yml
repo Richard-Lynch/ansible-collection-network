@@ -1,0 +1,95 @@
+---
+# The part of associate.yml that needs the CA to exist. Split out so a DRY RUN against an
+# account where the CA has not been created yet reports instead of failing — now that a dry run of
+# `ca` no longer ends the caller's play, a preview of ca -> associate -> client in one play reaches
+# here before the CA exists. An APPLY with no CA still fails at the gate in associate.yml.
+- name: Compare declared hostnames against live
+  ansible.builtin.set_fact:
+    _mtls_hosts_missing: >-
+      {{ cloudflare_access_mtls_hostnames | difference(_mtls_ca_hostnames_live) }}
+    _mtls_hosts_extra: >-
+      {{ _mtls_ca_hostnames_live | difference(cloudflare_access_mtls_hostnames) }}
+    _mtls_hosts_correct: >-
+      {{ (_mtls_ca_hostnames_live | sort) == (cloudflare_access_mtls_hostnames | sort) }}
+
+- name: "PREVIEW — hostname association plan"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '(DRY RUN — nothing written)' if not (cloudflare_access_mtls_apply | bool)
+         else '(APPLY MODE)' }}
+      CA '{{ cloudflare_access_mtls_ca_name }}' ({{ _mtls_ca_id }}) is currently associated with
+      {{ _mtls_ca_hostnames_live | default([], true) }}.
+      Declared: {{ cloudflare_access_mtls_hostnames | default([], true) }}.
+      {{ 'MATCHES — nothing to do.' if _mtls_hosts_correct | bool
+         else 'WOULD ADD ' + (_mtls_hosts_missing | join(', ') | default('(none)', true))
+              + '; WOULD REMOVE ' + (_mtls_hosts_extra | join(', ') | default('(none)', true))
+              + '. A hostname that is NOT associated rejects every client certificate for it and
+                 falls back to the SSO redirect, which looks like mTLS being broken rather than
+                 like a missing association.' }}
+
+- name: "APPLY — set the CA's associated hostnames"
+  ansible.builtin.uri:
+    url: "{{ _mtls_api }}/access/certificates/{{ _mtls_ca_id }}"
+    headers: "{{ _mtls_headers }}"
+    method: PUT
+    body_format: json
+    body:
+      name: "{{ cloudflare_access_mtls_ca_name }}"
+      associated_hostnames: "{{ cloudflare_access_mtls_hostnames }}"
+    status_code: [200, 400, 401, 403]
+    return_content: true
+  register: _mtls_assoc_put
+  no_log: true # the Authorization header; the gate below reports the status and body
+  changed_when: (_mtls_assoc_put.status | default(0)) == 200
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_hosts_correct | bool)
+
+- name: HARD GATE — association write must have succeeded
+  ansible.builtin.assert:
+    that:
+      - (_mtls_assoc_put.status | default(0)) == 200
+    fail_msg: >-
+      Failed to set associated_hostnames on CA {{ _mtls_ca_id }} — HTTP
+      {{ _mtls_assoc_put.status | default('unknown') }}:
+      {{ _mtls_assoc_put.content | default('no body') | truncate(300) }}. A 403 means the token
+      lacks "Access: Mutual TLS Certificates Write" (29d3afbfd4054af9accdd1118815ed05).
+    quiet: true
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_hosts_correct | bool)
+
+- name: "VERIFY — re-read the CA's associated hostnames"
+  ansible.builtin.uri:
+    url: "{{ _mtls_api }}/access/certificates/{{ _mtls_ca_id }}"
+    headers: "{{ _mtls_headers }}"
+    method: GET
+    status_code: [200]
+    return_content: true
+  register: _mtls_assoc_after
+  no_log: true # the Authorization header; the gate below reports the status and body
+  changed_when: false
+  when: cloudflare_access_mtls_apply | bool
+
+- name: HARD GATE — every declared hostname is associated after the run
+  # Asserts the DESIRED set is present rather than merely that the write returned 200: the write's
+  # own status says the request was accepted, not that the list is what was intended.
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cloudflare_access_mtls_hostnames
+         | difference((_mtls_assoc_after.content | from_json).result.associated_hostnames
+                      | default([]))) | length == 0
+    fail_msg: >-
+      After this run, CA '{{ cloudflare_access_mtls_ca_name }}' is associated with
+      {{ (_mtls_assoc_after.content | from_json).result.associated_hostnames | default([]) }},
+      which is missing declared hostname(s)
+      {{ cloudflare_access_mtls_hostnames
+         | difference((_mtls_assoc_after.content | from_json).result.associated_hostnames
+                      | default([])) }}. Client certificates for those hostnames will be rejected
+      and the request will fall through to the SSO login page.
+    success_msg: >-
+      CA '{{ cloudflare_access_mtls_ca_name }}' is associated with every declared hostname:
+      {{ cloudflare_access_mtls_hostnames | join(', ') }}.
+    quiet: true
+  when: cloudflare_access_mtls_apply | bool

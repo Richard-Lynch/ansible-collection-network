@@ -1,0 +1,7 @@
+---
+http:
+  middlewares:
+    upstream-auth:
+      headers:
+        customRequestHeaders:
+          Authorization: "Basic {{ molecule_upstream_credential | b64encode }}"

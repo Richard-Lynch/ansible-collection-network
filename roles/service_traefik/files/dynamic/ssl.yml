@@ -1,0 +1,10 @@
+---
+http:
+  middlewares:
+    traefik-https-redirect:
+      redirectscheme:
+        scheme: https
+    sslheader:
+      headers:
+        customrequestheaders:
+          X-Forwarded-Proto: https

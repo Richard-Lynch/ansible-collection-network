@@ -9,6 +9,17 @@ All notable changes to this collection are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the collection
 uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-11-03
+
+### Added
+
+- Role `service_traefik`: Traefik v3 with Docker Compose, Let's Encrypt certificates over Cloudflare DNS-01, and file-provider routes supplied by the caller as a directory of files and templates. Entrypoints publish on loopback unless told otherwise.
+- Role `service_cloudflared`: a Cloudflare Tunnel client run from a token.
+- Role `service_public_endpoint`: publishes a service as an internal DNS record and, optionally, a Cloudflare Tunnel hostname behind Cloudflare Access, reported before it is applied.
+- Role `service_frp_relay`: an frps relay for raw TCP passthrough, dashboard off by default.
+- Roles `cloudflare_access_mtls` and `cloudflare_hosting_edge`: Cloudflare Access mutual-TLS client certificates, and wildcard hosting routes with checks that a wildcard cannot capture, shadow or re-authenticate an existing hostname.
+- Role `hetzner_cloud_firewall`: reconciles a Hetzner Cloud firewall to a declared rule set, reported before it is applied.
+
 ## [1.0.0] — 2026-11-03
 
 ### Added

@@ -1,0 +1,14 @@
+---
+http:
+  routers:
+    whoami:
+      rule: Host(`whoami.example.com`)
+      entryPoints: [websecure]
+      service: whoami
+      tls:
+        certResolver: letsencryptresolver
+  services:
+    whoami:
+      loadBalancer:
+        servers:
+          - url: "http://192.0.2.20:8080"

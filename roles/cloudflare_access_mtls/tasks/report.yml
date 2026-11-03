@@ -1,0 +1,107 @@
+---
+# Read-only report: what exists in Cloudflare and 1Password today, and where they disagree.
+#
+# This is the default action, and it is the thing to run before and after any change. It reports
+# THREE outcomes per client — issued / not issued / cannot tell — rather than two, because an
+# unreadable 1Password item and an absent one are different facts and conflating them is how
+# "nothing is there" comes to mean "I could not look".
+
+- name: Read each declared client's 1Password state
+  # Direct `op` read, not the cached lookup: the cache stores a MISS as '' and then never
+  # re-asks, so a report built on it would keep saying "not issued" about a client whose key is
+  # in 1Password (see the long note in ca.yml). A report that is confidently wrong about what
+  # exists is worse than no report. `op item get --fields` because these titles contain slashes.
+  ansible.builtin.command:
+    cmd: >-
+      op item get "{{ cloudflare_access_mtls_p12_password_1p_prefix }}-{{ item.name }}-key"
+      --vault "{{ cloudflare_access_mtls_vault }}"
+      --fields "label=password" --reveal
+  delegate_to: localhost
+  become: false
+  register: _mtls_report_reads
+  changed_when: false
+  # A read: it runs under --check too, so a check-mode run reports from real state.
+  check_mode: false
+  failed_when: false
+  no_log: true
+  loop: "{{ cloudflare_access_mtls_clients }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Resolve each declared client's reported state
+  # THREE outcomes, not two (see this file's header): issued / not issued / CANNOT TELL. An `op`
+  # call that failed for a reason other than "no such item" — no auth, network, a vault typo —
+  # must not be reported as "not issued", because that is a confident claim about state derived
+  # from a failure to look.
+  ansible.builtin.set_fact:
+    _mtls_report_clients: >-
+      {{ _mtls_report_clients | default([]) + [{
+           'name': item.item.name,
+           'common_name': item.item.common_name | default('(none declared)'),
+           'hostnames': item.item.hostnames | default([]),
+           'p12': item.item.p12 | default(false),
+           'key_in_1p': ((item.rc | default(1)) == 0
+             and (item.stdout | default('')) is search('-----BEGIN (RSA )?PRIVATE KEY-----')),
+           'read_ok': ((item.rc | default(1)) == 0
+             or ('isn\'t an item' in (item.stderr | default(''))
+                 or 'not found' in (item.stderr | default('') | lower)))
+         }] }}
+  loop: "{{ _mtls_report_reads.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  no_log: true
+
+- name: Report the CA
+  ansible.builtin.debug:
+    msg:
+      - "account: {{ cloudflare_access_mtls_account_id }}"
+      - "CA name: {{ cloudflare_access_mtls_ca_name }}"
+      - >-
+        CA in Cloudflare: {{ 'YES (id ' + _mtls_ca_id + ')' if _mtls_ca_exists | bool
+                             else 'NO — run action=ca' }}
+      - "associated hostnames (live): {{ _mtls_ca_hostnames_live | default([], true) }}"
+      - "associated hostnames (declared): {{ cloudflare_access_mtls_hostnames | default([], true) }}"
+      - >-
+        association drift: {{ 'none'
+          if (_mtls_ca_hostnames_live | sort) == (cloudflare_access_mtls_hostnames | sort)
+          else 'MISSING ' ~ (cloudflare_access_mtls_hostnames | difference(_mtls_ca_hostnames_live))
+               ~ ' / EXTRA ' ~ (_mtls_ca_hostnames_live | difference(cloudflare_access_mtls_hostnames))
+               ~ ' — a hostname not associated here rejects every client cert for it' }}
+      - "total CAs registered on the account: {{ _mtls_ca_parsed.result | default([]) | length }}"
+
+- name: Report the declared clients
+  ansible.builtin.debug:
+    msg: >-
+      {{ _mtls_report_clients | default([])
+         | map('to_json') | list
+         if (_mtls_report_clients | default([]) | length) > 0
+         else 'no clients declared in cloudflare_access_mtls_clients' }}
+
+- name: "WARN — any client whose 1Password state could NOT be read"
+  # Reported separately and loudly. `key_in_1p: false` on a client whose read FAILED does not mean
+  # "not issued", it means "I could not look" — and the two must never print the same way, or a
+  # broken read presents as a confident absence.
+  ansible.builtin.debug:
+    msg: >-
+      CANNOT TELL for {{ _unreadable | map(attribute='name') | list }} — the 1Password read failed
+      for a reason other than "no such item", so their `key_in_1p: false` above is NOT evidence
+      that no certificate was issued. Check `op whoami` reports a SERVICE_ACCOUNT and that the
+      vault name is right before acting on this report.
+  vars:
+    _unreadable: >-
+      {{ _mtls_report_clients | default([]) | rejectattr('read_ok') | list }}
+  when: (_mtls_report_clients | default([]) | rejectattr('read_ok') | list | length) > 0
+
+- name: Report what is NOT covered by this role
+  # Said explicitly so the report cannot be read as a complete picture of the auth posture.
+  ansible.builtin.debug:
+    msg:
+      - "NOT managed here: the Access APPLICATION and its policies (a play owns those)."
+      - >-
+        A client certificate only works when BOTH are true: the CA is associated with the
+        hostname (above), AND the hostname's Access app has a `non_identity` policy whose
+        include is a `common_name` matching the certificate's CN. Either alone fails as an
+        ordinary SSO redirect.
+      - >-
+        NOT automated: moving a .p12 onto a device, and certificate REVOCATION — Cloudflare
+        Access has no CRL/OCSP for a client CA. See roles/cloudflare_access_mtls/README.md.

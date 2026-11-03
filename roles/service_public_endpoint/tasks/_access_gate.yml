@@ -1,0 +1,92 @@
+---
+# Decide whether Access authenticates _fqdn, and fail if it does not. Extracted from
+# public_surface.yml so molecule exercises THIS code rather than a copy of it.
+#
+# Inputs:  _fqdn (str), _access_apps (registered `uri` GET of /access/apps),
+#          _access_pol (registered `uri` loop over those apps' /policies, failed_when: false)
+# Outputs: _access_winner (list of candidate apps, most specific first)
+
+- name: Resolve which Access app WINS for this hostname
+  # TWO properties a naive check gets wrong, each of which reports a publicly reachable,
+  # login-free hostname as protected:
+  #
+  #  1. AN APP CAN COVER SEVERAL HOSTNAMES. A bypass app can have domain=a.example.com but
+  #     self_hosted_domains=[a, b]. Matching only `.domain` misses b entirely, so the wildcard
+  #     looks like the winner and the name reads as protected.
+  #  2. "BYPASS" IS A POLICY DECISION, NOT A NAME. Grepping the app's NAME for "bypass" lets
+  #     an app called anything else with `decision: bypass` pass cleanly.
+  #
+  # Most-specific wins, which is how Cloudflare resolves overlapping apps: an exact hostname match
+  # beats the parent wildcard. Compared by DOMAIN LENGTH, not lexicographically — reverse-alpha
+  # can happen to work for a given set of apps and would silently pick the wrong one for others.
+  #
+  # Each candidate also records whether its policies were actually READ (`policies_read`). The
+  # per-app reads run with failed_when: false, and an unreadable app yields no decisions at all —
+  # which `'bypass' not in []` would accept. The gate below refuses that.
+  ansible.builtin.set_fact:
+    _access_winner: >-
+      {{ _candidates | sort(attribute='_len') | reverse | list }}
+  vars:
+    _suffix: >-
+      {{ _fqdn | regex_replace('^[^.]+[.]', '') }}
+    _candidates: >-
+      {%- set out = [] -%}
+      {%- for a in (_access_apps.json.result | default([])) -%}
+      {%- set doms = (a.self_hosted_domains | default([a.domain | default('')])) -%}
+      {%- for d in doms -%}
+      {%- if d == _fqdn or d == ('*.' ~ _suffix) -%}
+      {%- set pol = (_access_pol.results | default([]) | selectattr('item.id', 'eq', a.id) | first) | default({}) -%}
+      {%- set read_ok = (pol.status | default(0)) == 200
+                        and ((pol.json | default({})).result | default(none)) is iterable
+                        and ((pol.json | default({})).result | default(none)) is not string -%}
+      {%- set decisions = ((pol.json | default({})).result | default([]))
+                          | map(attribute='decision') | list if read_ok else [] -%}
+      {%- set _ = out.append({'name': a.name, 'domain': d, '_len': d | length,
+                              'policies_read': read_ok, 'status': pol.status | default('not read'),
+                              'decisions': decisions}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: HARD GATE — the Access apps were read, and every app matching this hostname had its policies read
+  # Fails CLOSED. An app whose policies could not be read (403, timeout, a token missing the Access
+  # read scope) has unknown decisions — it may be a bypass. Reporting such a hostname as protected
+  # is the one wrong answer this gate exists to prevent.
+  ansible.builtin.assert:
+    that:
+      - (_access_apps.status | default(0)) == 200
+      - _access_winner | rejectattr('policies_read') | list | length == 0
+    fail_msg: >-
+      {{ 'Could not read the Access applications (HTTP ' ~ (_access_apps.status | default('?')) ~ ').'
+         if (_access_apps.status | default(0)) != 200
+         else 'Could not read the policies of Access app(s) matching ' ~ _fqdn ~ ': '
+              ~ (_unread | map(attribute='name') | join(', ')) ~ ' (HTTP '
+              ~ (_unread | map(attribute='status') | map('string') | join(', ')) ~ ').' }}
+      Their decisions are unknown, so whether the hostname requires login cannot be decided.
+    quiet: true
+  vars:
+    _unread: "{{ _access_winner | rejectattr('policies_read') | list }}"
+
+- name: HARD GATE — the app that WINS for this hostname must require identity
+  # Coverage is not authentication. Asserted on the winning app's POLICY DECISIONS, so an app that
+  # bypasses is caught whatever it is called and however many hostnames it lists.
+  ansible.builtin.assert:
+    that:
+      - _access_winner | length > 0
+      - "'bypass' not in (_access_winner[0].decisions | default([]))"
+    fail_msg: >-
+      {{ 'No Access app matches ' ~ _fqdn ~ ' — the hostname is UNPROTECTED.'
+         if (_access_winner | length) == 0
+         else ("The Access app winning for " ~ _fqdn ~ " is '" ~ _access_winner[0].name
+               ~ "' (matched on " ~ _access_winner[0].domain ~ ") and its policy decisions are "
+               ~ (_access_winner[0].decisions | join(', '))
+               ~ " — a BYPASS means the hostname is reachable without login.") }}
+      Refusing to report this as published-behind-login.
+    # success_msg is templated even when the assert fails, so it must not index an empty list —
+    # otherwise "no app matches" errors out instead of printing the message above.
+    success_msg: >-
+      {{ _fqdn }} is protected by Access app '{{ (_access_winner | first | default({})).name | default('?') }}'
+      (matched on {{ (_access_winner | first | default({})).domain | default('?') }},
+      decisions: {{ (_access_winner | first | default({})).decisions | default([]) | join(', ') }}).
+    quiet: true

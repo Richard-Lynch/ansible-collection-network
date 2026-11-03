@@ -1,0 +1,21 @@
+# Check/parse-mode scenario for service_frp_relay.
+# The real relay host can't be reproduced in CI, so this renders frps.ini + compose from sample vars
+# and asserts the dashboard is OFF by default.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default        # no container — we render/verify locally (delegated to localhost)
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

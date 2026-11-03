@@ -1,0 +1,18 @@
+{
+  "result": {
+    "config": {
+      "ingress": [
+        {"hostname": "alpha.example.com", "service": "https://traefik"},
+        {"hostname": "bravo.example.com", "service": "https://traefik"},
+        {"hostname": "charlie.example.com", "service": "https://traefik"},
+        {"hostname": "delta.example.com", "service": "https://traefik"},
+        {"hostname": "echo.example.com", "service": "https://traefik"},
+        {"hostname": "foxtrot.example.com", "service": "https://traefik"},
+        {"hostname": "golf.example.com", "service": "https://traefik"},
+        {"hostname": "hotel.example.com", "service": "https://traefik"},
+        {"hostname": "open-b.example.com", "service": "https://traefik"},
+        {"service": "http_status:404"}
+      ]
+    }
+  }
+}

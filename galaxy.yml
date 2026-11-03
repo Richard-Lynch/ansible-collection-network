@@ -4,18 +4,20 @@
 ---
 namespace: richard_lynch
 name: network
-version: 1.0.0
+version: 1.1.0
 readme: README.md
 authors:
   - Richard Lynch
 description: >-
-  Network service roles: BIND 9 authoritative and recursive DNS with dynamic updates, Kea DHCP with per-host reservations, DNS service registration, Pi-hole, Headscale and Tailscale, WireGuard peers, UniFi networks, DHCP options and WLANs through the controller API, and a multi-VLAN probe.
+  Network service roles: BIND 9 authoritative and recursive DNS with dynamic updates, Kea DHCP with per-host reservations, DNS service registration, Pi-hole, Headscale and Tailscale, WireGuard peers, UniFi networks, DHCP options and WLANs through the controller API, a multi-VLAN probe, and the edge: Traefik, Cloudflare Tunnel and Access (mTLS, wildcard hosting), published endpoints, an frp relay and the Hetzner Cloud firewall.
 license:
   - GPL-3.0-or-later
 tags:
   - networking
   - dns
   - dhcp
+  - proxy
+  - cloudflare
   - infrastructure
   - linux
 dependencies:

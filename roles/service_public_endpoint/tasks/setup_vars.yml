@@ -1,0 +1,105 @@
+---
+# Bridge the generated `__default` vars onto the plain names the tasks use, and derive the few
+# values that follow from the caller's input rather than being restated by it.
+- name: Resolve defaults
+  ansible.builtin.set_fact:
+    _endpoint_apply: "{{ endpoint_apply | default(endpoint_apply__default) | bool }}"
+    _endpoint_public: "{{ endpoint_public | default(endpoint_public__default) | bool }}"
+    _endpoint_zone: "{{ endpoint_zone | default('') }}"
+    # Underscore-prefixed internals, NOT the caller-facing names: `set_fact` that assigns a
+    # variable from itself recurses ("maximum recursion depth exceeded") because the fact shadows
+    # the input it is derived from.
+    _endpoint_record_type: "{{ endpoint_record_type | default(endpoint_record_type__default) }}"
+    _endpoint_bind9_addr: "{{ endpoint_bind9_addr | default('') }}"
+    _endpoint_cname_target: "{{ endpoint_cname_target | default('') }}"
+    _endpoint_tunnel: "{{ endpoint_tunnel | default(endpoint_tunnel__default) }}"
+    _endpoint_tunnel_ids: "{{ endpoint_tunnel_ids | default(endpoint_tunnel_ids__default) }}"
+    _endpoint_tunnel_service: "{{ endpoint_tunnel_service | default('') }}"
+    _endpoint_traefik_dir: "{{ endpoint_traefik_dynamic_dir | default('') }}"
+    _endpoint_cf_account: "{{ endpoint_cf_account | default('') }}"
+    _endpoint_cf_zone: "{{ endpoint_cf_zone | default('') }}"
+    _endpoint_cf_token_item: "{{ endpoint_cf_token_item | default('') }}"
+    # Whether the caller passed the token itself. Only this boolean is a fact: the token is read
+    # where it is used (public_surface.yml, no_log), never copied into the play's facts here.
+    _endpoint_cf_token_direct: "{{ (endpoint_cf_api_token | default('')) | length > 0 }}"
+    _endpoint_op_vault: "{{ endpoint_op_vault | default('') }}"
+    _endpoint_do: "{{ endpoint_do | default(endpoint_do__default) }}"
+    _endpoint_origin_request: "{{ endpoint_origin_request | default(endpoint_origin_request__default) }}"
+    _endpoint_machine_zone_labels: "{{ endpoint_machine_zone_labels | default(endpoint_machine_zone_labels__default) }}"
+
+- name: HARD GATE — the options every run needs are set
+  ansible.builtin.assert:
+    that:
+      - _endpoint_zone | length > 0
+      - _endpoint_bind9_addr | length > 0
+      - _endpoint_record_type != 'CNAME' or _endpoint_cname_target | length > 0
+    fail_msg: >-
+      endpoint_zone, endpoint_bind9_addr and (for a CNAME) endpoint_cname_target must be set.
+      Got zone='{{ _endpoint_zone }}' bind9='{{ _endpoint_bind9_addr }}'
+      type={{ _endpoint_record_type }} target='{{ _endpoint_cname_target }}'.
+    quiet: true
+
+- name: Derive the fully-qualified name and the tunnel id
+  ansible.builtin.set_fact:
+    _fqdn: "{{ endpoint_name }}.{{ _endpoint_zone }}"
+    _tunnel_id: "{{ _endpoint_tunnel_ids[_endpoint_tunnel] | default('') if _endpoint_tunnel | length > 0 else '' }}"
+
+- name: HARD GATE — a public endpoint names a known tunnel and has its Cloudflare coordinates
+  # A typo here would otherwise resolve to an empty id and PUT against a nonexistent tunnel, or
+  # worse, succeed against the wrong one.
+  ansible.builtin.assert:
+    that:
+      - (_tunnel_id | length) > 0
+      - _endpoint_tunnel_service | length > 0
+      - _endpoint_cf_account | length > 0
+      - _endpoint_cf_zone | length > 0
+      - _endpoint_cf_token_direct | bool or (_endpoint_cf_token_item | length > 0 and _endpoint_op_vault | length > 0)
+    fail_msg: >-
+      A public endpoint needs a tunnel named in endpoint_tunnel_ids (got
+      '{{ _endpoint_tunnel }}', known: {{ _endpoint_tunnel_ids.keys() | list }}),
+      endpoint_tunnel_service, endpoint_cf_account, endpoint_cf_zone, and a Cloudflare token:
+      endpoint_cf_api_token, or endpoint_cf_token_item plus endpoint_op_vault.
+    quiet: true
+  when: _endpoint_public | bool
+
+# A missing or relative directory makes `find` below report a WARNING ("Not all paths examined")
+# and return nothing, which reads exactly like "no router exists" — the protection against
+# overwriting a live route would then never engage.
+- name: Read the traefik route directory
+  ansible.builtin.stat:
+    path: "{{ _endpoint_traefik_dir }}"
+  register: _endpoint_traefik_dir_stat
+  delegate_to: localhost
+  become: false
+  when: _endpoint_traefik_dir is abs
+
+- name: HARD GATE — the traefik route directory is an absolute path to an existing directory
+  ansible.builtin.assert:
+    that:
+      - _endpoint_traefik_dir is abs
+      - _endpoint_traefik_dir_stat.stat.isdir | default(false)
+    fail_msg: >-
+      endpoint_traefik_dynamic_dir must be the absolute path of an existing directory on the
+      controller; got '{{ _endpoint_traefik_dir }}'.
+    quiet: true
+
+- name: Detect an existing traefik router of this name
+  # Reads the dynamic config directory. A duplicate router name makes traefik REJECT the router,
+  # so an existing one is never silently overwritten — quietly shadowing a router of the same name
+  # would take the live route down at the moment this role claims to change nothing.
+  # `contains` is a per-line regex — `^\\s+name:` rather than a fixed-indent `^    name:$`, so a
+  # differently-indented file still matches.
+  ansible.builtin.find:
+    paths: "{{ _endpoint_traefik_dir }}"
+    patterns: "*.yml,*.yaml"
+    contains: "^\\s+{{ endpoint_name }}:"
+  register: _router_hits
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  failed_when: false
+
+- name: Record whether a router already exists
+  ansible.builtin.set_fact:
+    _router_exists: "{{ (_router_hits.files | default([]) | length) > 0 }}"
+    _router_files: "{{ _router_hits.files | default([]) | map(attribute='path') | list }}"

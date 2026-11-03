@@ -1,0 +1,10 @@
+{
+  "_comment": "Shaped like the registered result of public_surface.yml's per-app policy loop: one entry per app, its HTTP status and body. app-unread's read failed.",
+  "results": [
+    {"item": {"id": "app-wildcard"}, "status": 200, "json": {"result": [{"decision": "allow"}]}},
+    {"item": {"id": "app-bypass-a"}, "status": 200, "json": {"result": [{"decision": "bypass"}]}},
+    {"item": {"id": "app-bypass-b"}, "status": 200, "json": {"result": [{"decision": "bypass"}]}},
+    {"item": {"id": "app-multi"}, "status": 200, "json": {"result": [{"decision": "bypass"}]}},
+    {"item": {"id": "app-unread"}, "status": 403, "json": {"success": false, "errors": [{"code": 10000}]}}
+  ]
+}

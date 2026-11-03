@@ -1,0 +1,18 @@
+---
+# GENERATED from roles/cloudflare_hosting_edge/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate cloudflare_hosting_edge
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — cloudflare_hosting_edge_acm_wait_s must be >= 0; <= 7200"
+  ansible.builtin.assert:
+    that:
+      - "cloudflare_hosting_edge_acm_wait_s | int >= 0"
+      - "cloudflare_hosting_edge_acm_wait_s | int <= 7200"
+    fail_msg: "cloudflare_hosting_edge_acm_wait_s violates a constraint declared in meta/argument_specs.py: must be >= 0; <= 7200. Got: {{ cloudflare_hosting_edge_acm_wait_s | default('(unset)') }}"
+    quiet: true
+  when: cloudflare_hosting_edge_acm_wait_s is defined

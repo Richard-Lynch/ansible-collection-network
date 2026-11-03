@@ -1,0 +1,26 @@
+---
+# service_frp_relay — an frps (fatedier/frp server) TCP relay on a public host. It forwards raw TCP
+# (80/443 by default) to a private network whose frpc client dials OUT to bind_port, so names pointed
+# at the relay's address reach a service behind NAT without an inbound port on the private network.
+# TLS is not terminated on the relay: it passes through to the proxy behind frpc.
+#
+# Hand-written (defaults/SKIP): meta/argument_specs.py is the documentation of record.
+
+frp_version: "v0.65.0"
+frp_deploy_dir: "/opt/frps"
+
+frp_bind_port: 7000
+frp_allow_ports: "80,443"
+
+# frp_token — REQUIRED, deliberately no default. The shared control-channel secret must come from
+# the caller (a secret store, never hardcoded) and match frpc.ini: a default here would satisfy
+# `required: true` and run a public relay on a publicly known secret. tasks/_guards.yml also
+# rejects placeholder-looking values.
+# e.g. frp_token: "{{ vault_frp_token }}"
+
+# Dashboard: OFF by default. If ever needed, set enabled + reach it via an SSH tunnel to 127.0.0.1 —
+# the template hard-binds dashboard_addr to loopback so it can never be exposed publicly.
+# frp_dashboard_pwd has no default either: enabling the dashboard requires supplying one.
+frp_dashboard_enabled: false
+frp_dashboard_port: 7500
+frp_dashboard_user: "admin"

@@ -1,0 +1,45 @@
+# Drive the role's REAL client-splitting logic offline.
+#
+# This includes the role's own tasks/_split_clients.yml rather than re-deriving the
+# selectattr/rejectattr chain here. A scenario that copied the expression would be asserting a
+# copy against itself (MOLMIRROR-01) and would stay green through a real regression in the role.
+#
+# The fixture is deliberately MIXED — issued, not-issued, and a name absent from the state map
+# entirely — because a split that simply returned everything, or nothing, would pass a fixture
+# where every client fell on one side.
+---
+- name: Converge
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Three clients in three different states. `phone-app` is already issued; the others
+    # exist to make a wrong split detectable.
+    cloudflare_access_mtls_clients:
+      - name: phone-app
+        common_name: phone-app.chat.example.com
+        hostnames: [chat.example.com]
+        p12: true
+      - name: tablet-app
+        common_name: tablet-app.example.com
+        hostnames: [home.example.com]
+        p12: true
+      - name: never-checked
+        common_name: never-checked.example.com
+        hostnames: [chat.example.com]
+
+    # name -> "key already in 1Password?". `never-checked` is deliberately ABSENT rather than
+    # false: an absent name must land in TODO (the safe direction), and conflating "absent" with
+    # "issued" is the bug that would skip a brand-new device.
+    _mtls_client_state:
+      phone-app: true
+      tablet-app: false
+
+  tasks:
+    - name: Run the role's own client split
+      # Pure computation — no API, no credential, no 1Password. That is what makes this offline.
+      ansible.builtin.include_role:
+        name: cloudflare_access_mtls
+        tasks_from: _split_clients.yml
+      # NOTE: tasks_from on include_role IS honoured. In a `roles:` list it would silently become
+      # a role PARAMETER and run `main` instead — which here would try to reach
+      # Cloudflare. Hence include_role in tasks:, not a roles: entry.

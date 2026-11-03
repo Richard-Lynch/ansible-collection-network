@@ -1,0 +1,29 @@
+---
+# One case: the merge MUST raise, and the message MUST contain the stated reason. Asserting the
+# reason is what stops a case passing because the filter could not be found.
+- name: Reset
+  ansible.builtin.set_fact:
+    _raised: false
+    _raised_msg: ""
+
+- name: "{{ case.id }} — run the merge"
+  block:
+    - name: Merge
+      ansible.builtin.set_fact:
+        _ignored: "{{ case.before | richard_lynch.network.hosting_edge_merge_ingress(case.wanted) }}"
+    - name: Note that it did not raise
+      ansible.builtin.set_fact:
+        _raised: false
+  rescue:
+    - name: Capture the refusal
+      ansible.builtin.set_fact:
+        _raised: true
+        _raised_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+- name: "{{ case.id }} — refused, for the right reason"
+  ansible.builtin.assert:
+    that:
+      - _raised
+      - case.expect in _raised_msg
+    fail_msg: "case {{ case.id }}: raised={{ _raised }} message={{ _raised_msg[:300] }}"
+    quiet: true

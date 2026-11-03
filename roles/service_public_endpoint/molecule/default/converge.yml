@@ -1,0 +1,82 @@
+---
+# Calls the role's REAL decision logic against captured fixtures. Contains no copy of that logic:
+# a scenario that re-derives the expressions asserts a copy against itself and stays green through
+# the exact bug it was written to catch.
+- name: Converge
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _endpoint_tunnel_service: "https://traefik.example.com"
+    _second: "{{ lookup('file', 'files/tunnel_second.json') | from_json }}"
+    # Shaped like the registered `uri` results public_surface.yml hands to _access_gate.yml.
+    _apps_ok: {status: 200, json: "{{ lookup('file', 'files/access_apps.json') | from_json }}"}
+    _pols: "{{ lookup('file', 'files/access_policies.json') | from_json }}"
+
+  tasks:
+    # --- the ingress merge, against a nine-hostname tunnel ------------------------------------
+    - name: Merge a NEW hostname into the second tunnel's ingress
+      ansible.builtin.include_role:
+        name: service_public_endpoint
+        tasks_from: _ingress_merge
+      vars:
+        _ingress_before: "{{ _second.result.config.ingress }}"
+        _fqdn: "grafana.example.com"
+
+    - name: Keep the result
+      ansible.builtin.set_fact:
+        r_new: "{{ _ingress_after }}"
+
+    - name: Merge an EXISTING hostname (idempotence — must not duplicate)
+      ansible.builtin.include_role:
+        name: service_public_endpoint
+        tasks_from: _ingress_merge
+      vars:
+        _ingress_before: "{{ _second.result.config.ingress }}"
+        _fqdn: "foxtrot.example.com"
+
+    - name: Keep the result
+      ansible.builtin.set_fact:
+        r_existing: "{{ _ingress_after }}"
+
+    # --- adopting an EXISTING hostname must not rewrite its route -------------------------------
+    # The second tunnel's rules say `service: https://traefik` (container-local, its own traefik).
+    # The caller's service here is `https://traefik.example.com` (a different proxy), which has no
+    # routers for those hostnames. Rebuilding an existing rule would 404 nine live public
+    # services while a hostname-only gate reported success.
+    - name: Adopt foxtrot with the WRONG default service — must carry the existing rule through
+      ansible.builtin.include_role:
+        name: service_public_endpoint
+        tasks_from: _ingress_merge
+      vars:
+        _ingress_before: "{{ _second.result.config.ingress }}"
+        _fqdn: "foxtrot.example.com"
+        _endpoint_tunnel_service: "https://traefik.example.com"
+
+    - name: Keep the result
+      ansible.builtin.set_fact:
+        r_adopt: "{{ _ingress_after }}"
+
+    # --- the Access gate: the role's OWN _access_gate.yml, pass and refuse cases ---------------
+    - name: Run the Access gate for each case
+      ansible.builtin.include_tasks: _access_case.yml
+      loop:
+        - {fqdn: grafana.example.com}   # only the wildcard matches -> allow -> PASS
+        - {fqdn: open-a.example.com}    # exact bypass app beats the wildcard -> REFUSE
+        - {fqdn: open-b.example.com}    # likewise, and it is also on the tunnel -> REFUSE
+        - {fqdn: multi-2.example.com}   # reached only via self_hosted_domains -> REFUSE
+        - {fqdn: unread.example.com}    # matching app's policies unreadable -> REFUSE (fail closed)
+        - fqdn: lonely.example.org      # no app matches at all -> REFUSE
+        - fqdn: grafana.example.com     # app list itself unreadable -> REFUSE
+          apps: {status: 403, json: {success: false}}
+          key: apps-unreadable
+      loop_control:
+        loop_var: _case
+        label: "{{ _case.key | default(_case.fqdn) }}"
+
+    - name: Persist for verify
+      ansible.builtin.copy:
+        content: "{{ {'new': r_new, 'existing': r_existing, 'adopt': r_adopt,
+                      'access': r_access} | to_nice_json }}\n"
+        dest: "/tmp/molecule_service_public_endpoint.json"
+        mode: "0644"

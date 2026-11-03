@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Publish one service as a DNS name: an internal record through BIND 9, a check for an existing
+    traefik router, and optionally a proxied Cloudflare record, tunnel ingress entry and an Access
+    gate, reported before anything is applied.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [dns, cloudflare, traefik, networking]
+dependencies: []

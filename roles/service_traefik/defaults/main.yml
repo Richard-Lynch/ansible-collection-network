@@ -1,0 +1,80 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_traefik/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_traefik
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Container (and compose service) name.
+traefik_container_name__default: traefik
+
+# Directory on the host holding the compose project, app.env, the static
+# config (config/traefik.yml), the route files (config/dynamic/) and the ACME
+# store (letsencrypt/). Empty means /opt/<traefik_container_name>.
+traefik_config_dir__default: ''
+
+# Attachable docker network Traefik joins; containers routed by docker labels
+# join it too. Created if absent.
+traefik_network__default: traefik
+
+# Image, pinned to a release tag; bump it deliberately.
+traefik_image__default: traefik:v3.3
+
+# Host address the HTTP and HTTPS entrypoints are published on. The default
+# publishes on loopback only, so nothing is reachable until the caller decides
+# it should be. The dashboard router has no authentication of its own, so
+# publishing on every interface (an empty string) also publishes the dashboard
+# to everyone who can reach the host; restrict it with a firewall or by giving
+# a specific address.
+traefik_bind_address__default: 127.0.0.1
+
+# Host port for the web (HTTP) entrypoint, which redirects to HTTPS.
+traefik_http_port__default: 80
+
+# Host port for the websecure (HTTPS) entrypoint.
+traefik_https_port__default: 443
+
+# TZ for the container.
+traefik_timezone__default: UTC
+
+# Name of the certificate resolver in the static config; route files refer to
+# it as tls.certResolver.
+traefik_acme_resolver__default: letsencryptresolver
+
+# Disable TLS verification for EVERY https upstream (serversTransport). Only
+# for backends with self-signed certificates and no better option; prefer a
+# per-service serversTransport with the backend's CA.
+traefik_servers_insecure_skip_verify__default: false
+
+# Optional controller directory of route TEMPLATES (*.j2), rendered into
+# config/dynamic/ without the .j2 suffix at mode 0640 — the place for a route
+# that carries a secret (a forwardAuth header, an upstream credential). Empty
+# means none; a non-empty path must exist.
+traefik_dynamic_templates_dir__default: ''
+
+# Basenames of route files to remove from config/dynamic/. The file provider
+# serves whatever is in that directory, so a route deleted from the source
+# stays live until it is listed here.
+traefik_retired_dynamic_files__default: []
+
+# Optional existing docker network to a forward-auth service, joined at the
+# fixed address traefik_forward_auth_traefik_ip so the auth service can tell
+# Traefik's requests from anything else's. Empty means none. The network is
+# not created here: it must already exist, be internal, and use
+# traefik_forward_auth_subnet (checked before the stack is deployed).
+traefik_forward_auth_network__default: ''
+
+# IPv4 subnet of traefik_forward_auth_network (CIDR).
+traefik_forward_auth_subnet__default: ''
+
+# Traefik's fixed address on traefik_forward_auth_network, inside
+# traefik_forward_auth_subnet.
+traefik_forward_auth_traefik_ip__default: ''
+
+# Bring the stack up (and restart it on a route change). False renders and
+# copies the configuration only, for tests.
+traefik_deploy__default: true

@@ -1,0 +1,183 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/cloudflare_hosting_edge/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate cloudflare_hosting_edge
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Wildcard tunnel route, DNS record and Access app per hosting tier
+    description:
+      - "For each tier: one wildcard ingress rule on the tunnel pointing at the origin's"
+      - Traefik entrypoint port, one proxied wildcard CNAME, and one wildcard Access
+      - application (owner SSO allow plus a service-token non_identity policy).
+      - After this a new app needs no DNS, tunnel or Access step.
+      - 'Before any write it proves the wildcards cannot capture an existing hostname: no'
+      - existing DNS name, ingress hostname or Access app domain falls under them, and the
+      - winning Access app for every existing hostname is identical before and after.
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_hosting_edge_tiers:
+        description:
+          - 'Tier name to its settings: suffix (the wildcard is star.suffix), entrypoint_port (the'
+          - Traefik port the tunnel route for that tier targets) and the 1Password item names that
+          - hold the tier's Access service token (cf_id_item, cf_secret_item).
+        type: dict
+        required: true
+      cloudflare_hosting_edge_zone_id:
+        description:
+          - Zone id of the zone the wildcards live in.
+        type: str
+        required: true
+      cloudflare_hosting_edge_api_token:
+        description:
+          - The Cloudflare API token itself, from whatever secret store the caller uses. When set
+          - it is used directly and cloudflare_hosting_edge_token_item is not read. One of the two
+          - is required.
+        type: str
+        required: false
+        no_log: true
+      cloudflare_hosting_edge_token_item:
+        description:
+          - 'Alternative to cloudflare_hosting_edge_api_token: the 1Password item id (not title:'
+          - titles with slashes read as empty) of the API token, read through
+          - richard_lynch.common.onepassword_cached (needs the op CLI).
+        type: str
+        required: false
+      cloudflare_hosting_edge_token_field:
+        description:
+          - Field of that item holding the token. API Credential items use credential, Password items use password.
+        type: str
+        required: false
+        default: credential
+      cloudflare_hosting_edge_op_vault:
+        description:
+          - 1Password vault holding cloudflare_hosting_edge_token_item and, on apply, the tier
+          - service tokens (created ones are stored there through richard_lynch.common.secrets_manager).
+          - Required with cloudflare_hosting_edge_token_item, and for an apply of main.
+        type: str
+        required: false
+      cloudflare_hosting_edge_apply:
+        description:
+          - Generate-don't-apply. False reads, gates and reports; true writes and reads back.
+        type: bool
+        required: false
+        default: false
+      cloudflare_hosting_edge_account_id:
+        description:
+          - Cloudflare account id.
+        type: str
+        required: true
+      cloudflare_hosting_edge_tunnel_id:
+        description:
+          - Id of the tunnel whose ingress receives the wildcard rules.
+        type: str
+        required: true
+      cloudflare_hosting_edge_origin:
+        description:
+          - Host that runs Traefik; the tunnel service is http://origin:entrypoint_port.
+        type: str
+        required: true
+      cloudflare_hosting_edge_sso_group_id:
+        description:
+          - Existing Access group the human allow policy reuses (never copied).
+        type: str
+        required: true
+      cloudflare_hosting_edge_zone_app_id:
+        description:
+          - Id of the zone-wide wildcard Access app (star.zone), read before and after and asserted unchanged by this role.
+        type: str
+        required: true
+      cloudflare_hosting_edge_session_duration:
+        description:
+          - Access session length for the new apps.
+        type: str
+        required: false
+        default: 24h
+  acm:
+    short_description: Order an Advanced Certificate Manager pack and read it back active
+    description:
+      - The Universal certificate covers one label below the zone only, so a two-level
+      - wildcard needs an ACM advanced pack. Reads the existing packs first and orders
+      - only what is not already active or in flight, then waits and ASSERTS each wildcard
+      - host is named by an active pack. Never reports an order as success.
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      cloudflare_hosting_edge_tiers:
+        description:
+          - 'Tier name to its settings: suffix (the wildcard is star.suffix), entrypoint_port (the'
+          - Traefik port the tunnel route for that tier targets) and the 1Password item names that
+          - hold the tier's Access service token (cf_id_item, cf_secret_item).
+        type: dict
+        required: true
+      cloudflare_hosting_edge_zone_id:
+        description:
+          - Zone id of the zone the wildcards live in.
+        type: str
+        required: true
+      cloudflare_hosting_edge_api_token:
+        description:
+          - The Cloudflare API token itself, from whatever secret store the caller uses. When set
+          - it is used directly and cloudflare_hosting_edge_token_item is not read. One of the two
+          - is required.
+        type: str
+        required: false
+        no_log: true
+      cloudflare_hosting_edge_token_item:
+        description:
+          - 'Alternative to cloudflare_hosting_edge_api_token: the 1Password item id (not title:'
+          - titles with slashes read as empty) of the API token, read through
+          - richard_lynch.common.onepassword_cached (needs the op CLI).
+        type: str
+        required: false
+      cloudflare_hosting_edge_token_field:
+        description:
+          - Field of that item holding the token. API Credential items use credential, Password items use password.
+        type: str
+        required: false
+        default: credential
+      cloudflare_hosting_edge_op_vault:
+        description:
+          - 1Password vault holding cloudflare_hosting_edge_token_item and, on apply, the tier
+          - service tokens (created ones are stored there through richard_lynch.common.secrets_manager).
+          - Required with cloudflare_hosting_edge_token_item, and for an apply of main.
+        type: str
+        required: false
+      cloudflare_hosting_edge_apply:
+        description:
+          - Generate-don't-apply. False reads, gates and reports; true writes and reads back.
+        type: bool
+        required: false
+        default: false
+      cloudflare_hosting_edge_acm_ca:
+        description:
+          - Certificate authority for the pack.
+        type: str
+        required: false
+        default: lets_encrypt
+        choices:
+          - google
+          - lets_encrypt
+          - ssl_com
+      cloudflare_hosting_edge_acm_validity_days:
+        description:
+          - Pack validity in days.
+        type: int
+        required: false
+        default: 90
+        choices:
+          - 14
+          - 30
+          - 90
+          - 365
+      cloudflare_hosting_edge_acm_wait_s:
+        description:
+          - How long to wait for the pack to become active (DCV can take minutes).
+        type: int
+        required: false
+        default: 1800
