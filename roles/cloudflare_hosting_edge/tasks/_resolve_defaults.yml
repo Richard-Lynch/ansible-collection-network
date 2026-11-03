@@ -1,0 +1,49 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/cloudflare_hosting_edge/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate cloudflare_hosting_edge
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    cloudflare_hosting_edge_token_field: "{{ cloudflare_hosting_edge_token_field | default(cloudflare_hosting_edge_token_field__default) if cloudflare_hosting_edge_token_field__default is defined else cloudflare_hosting_edge_token_field | default(omit) }}"
+    cloudflare_hosting_edge_apply: "{{ cloudflare_hosting_edge_apply | default(cloudflare_hosting_edge_apply__default) if cloudflare_hosting_edge_apply__default is defined else cloudflare_hosting_edge_apply | default(omit) }}"
+    cloudflare_hosting_edge_session_duration: "{{ cloudflare_hosting_edge_session_duration | default(cloudflare_hosting_edge_session_duration__default) if cloudflare_hosting_edge_session_duration__default is defined else cloudflare_hosting_edge_session_duration | default(omit) }}"
+    cloudflare_hosting_edge_acm_ca: "{{ cloudflare_hosting_edge_acm_ca | default(cloudflare_hosting_edge_acm_ca__default) if cloudflare_hosting_edge_acm_ca__default is defined else cloudflare_hosting_edge_acm_ca | default(omit) }}"
+    cloudflare_hosting_edge_acm_validity_days: "{{ cloudflare_hosting_edge_acm_validity_days | default(cloudflare_hosting_edge_acm_validity_days__default) if cloudflare_hosting_edge_acm_validity_days__default is defined else cloudflare_hosting_edge_acm_validity_days | default(omit) }}"
+    cloudflare_hosting_edge_acm_wait_s: "{{ cloudflare_hosting_edge_acm_wait_s | default(cloudflare_hosting_edge_acm_wait_s__default) if cloudflare_hosting_edge_acm_wait_s__default is defined else cloudflare_hosting_edge_acm_wait_s | default(omit) }}"
+  when: not (_cloudflare_hosting_edge__argspec_resolved | default(false))
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    cloudflare_hosting_edge_token_field: "{{ cloudflare_hosting_edge_token_field__default if cloudflare_hosting_edge_token_field__default is defined else cloudflare_hosting_edge_token_field | default(omit) }}"
+    cloudflare_hosting_edge_apply: "{{ cloudflare_hosting_edge_apply__default if cloudflare_hosting_edge_apply__default is defined else cloudflare_hosting_edge_apply | default(omit) }}"
+    cloudflare_hosting_edge_session_duration: "{{ cloudflare_hosting_edge_session_duration__default if cloudflare_hosting_edge_session_duration__default is defined else cloudflare_hosting_edge_session_duration | default(omit) }}"
+    cloudflare_hosting_edge_acm_ca: "{{ cloudflare_hosting_edge_acm_ca__default if cloudflare_hosting_edge_acm_ca__default is defined else cloudflare_hosting_edge_acm_ca | default(omit) }}"
+    cloudflare_hosting_edge_acm_validity_days: "{{ cloudflare_hosting_edge_acm_validity_days__default if cloudflare_hosting_edge_acm_validity_days__default is defined else cloudflare_hosting_edge_acm_validity_days | default(omit) }}"
+    cloudflare_hosting_edge_acm_wait_s: "{{ cloudflare_hosting_edge_acm_wait_s__default if cloudflare_hosting_edge_acm_wait_s__default is defined else cloudflare_hosting_edge_acm_wait_s | default(omit) }}"
+  when: _cloudflare_hosting_edge__argspec_resolved | default(false)
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _cloudflare_hosting_edge__argspec_resolved: true

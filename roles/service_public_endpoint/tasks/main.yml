@@ -1,0 +1,157 @@
+---
+# Publish ONE service as a human-authored name: internal DNS + a check for its traefik route, and
+# optionally a public Cloudflare record + tunnel ingress. One call per service, so the multi-step
+# manual publication cannot be half-done.
+#
+# ############################################################################################
+# HUMAN-AUTHORED NAMES ONLY. This role writes names in `endpoint_zone` — human-authored,
+# git-owned. It must NEVER touch a machine-owned zone (DHCP-driven DNS updates for hosts,
+# dns_service_registrar for services), where humans author nothing. Callers name such zones by a
+# label in endpoint_machine_zone_labels, and a gate below enforces it rather than trusting callers.
+#
+# THE CNAME/A COLLISION, and why step 1 reads DNS rather than the file. A name cannot hold both a
+# CNAME and an A record: bind9 refuses to load the ENTIRE ZONE, so one bad name takes every other
+# name in the zone down with it. `add_host_to_domain` and `add_cname_to_domain` use DIFFERENT
+# blockinfile markers, so they do not deduplicate each other — writing an A for a name that already
+# holds a CNAME produces exactly that.
+#
+# THE INGRESS REPLACEMENT TRAP. `PUT /cfd_tunnel/{id}/configurations` REPLACES the whole ingress
+# list. A PUT that sends only the new rule DELETES every existing one — every other service on that
+# tunnel. Always GET, append, PUT the full list with the catch-all last, then read back and assert
+# the pre-existing hostnames survived.
+#
+# ACCESS COVERAGE IS NOT AUTHENTICATION. A more-specific Access app BEATS the wildcard, and a
+# deliberate bypass app for one hostname is common. So the gate asserts on the most specific app
+# matching this hostname and that its winning policy requires identity — not merely that the
+# wildcard exists, which would pass while a name sat behind a bypass.
+# ############################################################################################
+#
+# GENERATE-DON'T-APPLY: reports the diff and changes nothing unless endpoint_apply=true.
+
+- name: Resolve the role's generated defaults
+  ansible.builtin.include_tasks: setup_vars.yml
+
+- name: Validate the request
+  ansible.builtin.assert:
+    that:
+      - (endpoint_name | default('')) | length > 0
+      - (endpoint_upstream | default('')) | length > 0
+      - "'.' not in endpoint_name"
+    fail_msg: >-
+      endpoint_name (a bare label, no dots) and endpoint_upstream are required.
+      Got name='{{ endpoint_name | default('') }}' upstream='{{ endpoint_upstream | default('') }}'.
+    quiet: true
+
+- name: HARD GATE — refuse to write into a machine-owned zone
+  # That zone is machine-owned. A human-authored record there blocks the owner's dynamic updates
+  # for that name, and fails in a way that looks like a permissions problem (bind9 answers
+  # NXRRSET) rather than like a policy breach.
+  ansible.builtin.assert:
+    that:
+      - _endpoint_zone.split('.') | intersect(_endpoint_machine_zone_labels) | length == 0
+    fail_msg: >-
+      endpoint_zone is '{{ _endpoint_zone }}', which is a machine-owned (DHCP/DDNS) zone. This role
+      writes human-authored names only. Register machine names through DHCP-driven DNS updates or
+      dns_service_registrar.
+    quiet: true
+
+- name: Read what the name resolves to TODAY
+  # Against the running server, not the repo. The repo can be stale, and the collision that matters
+  # is in the loaded zone. `+norecurse` so a forwarder cannot answer for us.
+  ansible.builtin.command:
+    cmd: >-
+      dig +norecurse +noall +answer @{{ _endpoint_bind9_addr }}
+      {{ endpoint_name }}.{{ _endpoint_zone }} ANY
+  register: _existing
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ endpoint_dns_probe_host | default(omit) }}"
+
+- name: HARD GATE — the probe itself must have worked
+  # WITHOUT THIS THE COLLISION GATE FAILS OPEN. `failed_when: false` on the dig above means an
+  # unreachable server, a wrong address, or any dig error yields empty stdout — and empty stdout
+  # classifies as "no existing record", so the gate below happily proceeds to the exact zone-killing
+  # write it exists to prevent. And dig writes DIAGNOSTICS to
+  # stdout, so non-empty output is not success either; check rc and reject lines starting `;;`.
+  ansible.builtin.assert:
+    that:
+      - _existing.rc == 0
+      - not (_existing.stdout | default('') is search('(?m)^;;'))
+    fail_msg: >-
+      Could not query {{ _endpoint_bind9_addr }} for
+      {{ endpoint_name }}.{{ _endpoint_zone }} (rc={{ _existing.rc }}).
+      Refusing to classify the existing record from a failed probe — treating "no answer" as "no
+      record" is how a CNAME/A collision gets written, and that takes the WHOLE zone down.
+      Output: {{ (_existing.stdout | default('') ~ ' ' ~ (_existing.stderr | default('')))[:200] }}
+    success_msg: "Probed {{ endpoint_name }}.{{ _endpoint_zone }} successfully."
+    quiet: true
+
+- name: Classify what is already there
+  # Split on ANY whitespace and index by position: dig output is TAB-separated, so a `\sCNAME\s`
+  # regex matches nothing and every name classifies as "absent".
+  ansible.builtin.set_fact:
+    _has_cname: >-
+      {{ _existing.stdout_lines | default([]) | map('split') | selectattr(3, 'defined')
+         | selectattr(3, 'eq', 'CNAME') | list | length > 0 }}
+    _has_a: >-
+      {{ _existing.stdout_lines | default([]) | map('split') | selectattr(3, 'defined')
+         | selectattr(3, 'eq', 'A') | list | length > 0 }}
+
+- name: HARD GATE — never add a record type that would collide with the existing one
+  # THE trap this role exists to avoid. Not a warning: bind9 refuses to load the whole zone, so the
+  # blast radius is every name in the zone, not just this one.
+  ansible.builtin.assert:
+    that:
+      - not (_has_cname | bool and _endpoint_record_type == 'A')
+      - not (_has_a | bool and _endpoint_record_type == 'CNAME')
+    fail_msg: >-
+      {{ endpoint_name }}.{{ _endpoint_zone }} already holds
+      {{ 'a CNAME' if _has_cname | bool else 'an A record' }}, and this call would add
+      {{ 'an A record' if _endpoint_record_type == 'A' else 'a CNAME' }}.
+      A name cannot hold both — bind9 would refuse to load the ENTIRE {{ _endpoint_zone }} zone,
+      taking every name in it down. Change the existing record's type in the same pass (add the new
+      type AND mark the old one state:absent), or call this role with the type already present.
+      Live answer: {{ _existing.stdout | default('(none)') | trim }}
+    success_msg: >-
+      {{ endpoint_name }}.{{ _endpoint_zone }}:
+      {{ 'already ' ~ _endpoint_record_type ~ ' — will reconcile' if (_has_cname or _has_a)
+         else 'no existing record — will create ' ~ _endpoint_record_type }}
+    quiet: true
+
+- name: Report the plan
+  ansible.builtin.debug:
+    msg:
+      - "{{ 'APPLY' if _endpoint_apply | bool else 'PREVIEW (set endpoint_apply=true to act)' }}"
+      - >-
+        {{ endpoint_name }}.{{ _endpoint_zone }} ({{ _endpoint_record_type }})
+        -> traefik -> {{ endpoint_upstream }}
+      - >-
+        public: {{ 'YES via ' ~ _endpoint_tunnel ~ ' (tunnel ingress + public DNS + Access)'
+                   if _endpoint_public | bool
+                   else 'NO — internal only, no public DNS record and no tunnel ingress' }}
+      - >-
+        existing traefik router named '{{ endpoint_name }}':
+        {{ 'YES — will NOT be overwritten' if _router_exists | bool else 'no' }}
+
+# NOT `meta: end_play`: that ends the ENTIRE PLAY, not this role include. In an include_role
+# loop it would report the first item and kill the run, so "generate-don't-apply" would show
+# one item of the diff. The acting includes
+# below are gated on the flag instead, so every item reports and none of them act.
+# The two halves can run on DIFFERENT HOSTS, so a caller must be able to ask for one without the
+# other: service_bind9_dns edits zone FILES and must run ON the DNS server, while the Cloudflare half
+# is pure API and runs from the controller. A role that always did both would fail with
+# "Zone '<zone>' not found" the moment it was invoked from the controller.
+#
+# `endpoint_do` selects: 'both' (default, when one host can do both), 'internal', or 'public'.
+- name: Reconcile the internal record
+  ansible.builtin.include_tasks: internal_record.yml
+  when:
+    - _endpoint_apply | bool
+    - _endpoint_do in ['both', 'internal']
+
+- name: Reconcile the public surface
+  ansible.builtin.include_tasks: public_surface.yml
+  when:
+    - _endpoint_apply | bool
+    - _endpoint_do in ['both', 'public']
+    - _endpoint_public | bool

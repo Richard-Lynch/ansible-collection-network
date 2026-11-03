@@ -1,0 +1,56 @@
+---
+# PURE COMPUTATION: split the declared clients into already-issued and to-issue, given a map of
+# name -> bool ("is this client's key already in 1Password?").
+#
+# Extracted into its own file for one reason: it is the part of this role where a bug does real
+# damage, and it is the only part that can be tested without a live Cloudflare account or real
+# 1Password items. Getting the split wrong in either direction is silent —
+#   * a client wrongly classed as NOT issued gets its certificate reissued, invalidating the copy
+#     already installed on the device while the run reports success;
+#   * a client wrongly classed as ISSUED is skipped, so a newly declared device never gets a
+#     certificate and the only symptom is that device failing to authenticate.
+# Neither shows up as an error, which is exactly why the molecule scenario drives THIS file
+# directly rather than re-deriving the expression over a stub (which would assert a copy against
+# itself and stay green through a real regression — MOLMIRROR-01).
+#
+# INPUT:  cloudflare_access_mtls_clients (declared list), _mtls_client_state (name -> bool)
+# OUTPUT: _mtls_clients_issued, _mtls_clients_todo
+
+- name: Collect the names whose key is already stored
+  # `selectattr('value')` keeps only the TRUE entries — a name present in the map with a false
+  # value means "checked, not issued", which is different from a name absent from the map
+  # entirely ("not checked"). Both end up in _todo, which is the safe direction: issuing is
+  # gated on further checks downstream, whereas skipping is not.
+  ansible.builtin.set_fact:
+    _mtls_issued_names: >-
+      {{ _mtls_client_state | default({}) | dict2items
+         | selectattr('value') | map(attribute='key') | list }}
+
+- name: Split the declared list on that set
+  ansible.builtin.set_fact:
+    _mtls_clients_issued: >-
+      {{ cloudflare_access_mtls_clients | selectattr('name', 'in', _mtls_issued_names) | list }}
+    _mtls_clients_todo: >-
+      {{ cloudflare_access_mtls_clients | rejectattr('name', 'in', _mtls_issued_names) | list }}
+
+- name: HARD GATE — the split must account for every declared client exactly once
+  # Not a tautology: it catches a duplicate `name` in the declared list, which would otherwise
+  # place one entry in BOTH lists (issued by name-match, and todo by a second entry of the same
+  # name) and reissue a live certificate. A duplicate name is a declaration error that is
+  # invisible until it does damage.
+  ansible.builtin.assert:
+    that:
+      - (_mtls_clients_issued | length) + (_mtls_clients_todo | length)
+        == (cloudflare_access_mtls_clients | length)
+      - (cloudflare_access_mtls_clients | map(attribute='name') | unique | length)
+        == (cloudflare_access_mtls_clients | length)
+    fail_msg: >-
+      The declared client list does not split cleanly:
+      {{ cloudflare_access_mtls_clients | length }} declared,
+      {{ _mtls_clients_issued | length }} already-issued +
+      {{ _mtls_clients_todo | length }} to-issue. The usual cause is a DUPLICATE `name` in
+      cloudflare_access_mtls_clients — names key both the filenames and the 1Password items, so
+      two entries sharing one name would overwrite each other's material and reissue a
+      certificate that is already live on a device. Declared names:
+      {{ cloudflare_access_mtls_clients | map(attribute='name') | list }}.
+    quiet: true

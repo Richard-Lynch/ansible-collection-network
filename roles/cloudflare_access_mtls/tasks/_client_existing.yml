@@ -1,0 +1,101 @@
+---
+# The part of client.yml that needs the CA to exist. Split out so a DRY RUN against an
+# account where the CA has not been created yet reports instead of failing — now that a dry run of
+# `ca` no longer ends the caller's play, a preview of ca -> associate -> client in one play reaches
+# here before the CA exists. An APPLY with no CA still fails at the gate in client.yml.
+- name: Check which declared clients already have a key in 1Password
+  # ==========================================================================================
+  # READ THROUGH `op`, NOT THE CACHED LOOKUP — same reason as the CA key in ca.yml, and the
+  # consequence here is the more damaging of the two.
+  #
+  # `richard_lynch.common.onepassword_cached` caches a MISS as '', so the first run (before the item exists)
+  # poisons the cache and every later run reads that stale ''. For an existence TEST the negative
+  # answer becomes permanent — and a client wrongly read as "not issued" is REISSUED, which
+  # invalidates the certificate already installed on that device while the run reports success.
+  #
+  # So this asks 1Password directly, once per declared client. `op item get --fields` rather than
+  # `op read op://...` because these titles contain SLASHES, which op read would treat as path
+  # separators and silently answer '' for. rc != 0 means absent, a normal answer.
+  # ==========================================================================================
+  ansible.builtin.command:
+    cmd: >-
+      op item get "{{ cloudflare_access_mtls_p12_password_1p_prefix }}-{{ item.name }}-key"
+      --vault "{{ cloudflare_access_mtls_vault }}"
+      --fields "label=password" --reveal
+  delegate_to: localhost
+  become: false
+  register: _mtls_client_reads
+  changed_when: false
+  # A read: it runs under --check too, so a check-mode run reports from real state.
+  check_mode: false
+  failed_when: false
+  no_log: true
+  loop: "{{ cloudflare_access_mtls_clients }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Build the name -> already-issued map
+  # True only when the read SUCCEEDED and returned something shaped like a private key. A
+  # non-empty value that is not a PEM (a truncated read, the wrong field) must not count as
+  # issued: treating it as issued would skip a device that has no working certificate.
+  ansible.builtin.set_fact:
+    _mtls_client_state: >-
+      {{ _mtls_client_state | default({}) | combine({
+           item.item.name: ((item.rc | default(1)) == 0
+             and (item.stdout | default('')) is search('-----BEGIN (RSA )?PRIVATE KEY-----'))
+         }) }}
+  loop: "{{ _mtls_client_reads.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  no_log: true
+
+- name: Split declared clients into already-issued and to-issue
+  # Delegated to _split_clients.yml rather than inlined, so the molecule scenario can drive the
+  # REAL split logic offline. See that file's header for why this split is the part worth testing.
+  ansible.builtin.include_tasks: _split_clients.yml
+
+- name: "PREVIEW — client certificate plan"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '(DRY RUN — nothing issued)' if not (cloudflare_access_mtls_apply | bool)
+         else '(APPLY MODE)' }}
+      {{ cloudflare_access_mtls_clients | length }} client(s) declared.
+      ALREADY ISSUED (left untouched — reissuing would invalidate the copy on the device):
+      {{ _mtls_clients_issued | map(attribute='name') | list | default([], true) }}.
+      WOULD ISSUE: {{ _mtls_clients_todo | map(attribute='name') | list | default([], true) }}.
+      Each new certificate is signed by CA '{{ cloudflare_access_mtls_ca_name }}', its key stored
+      in 1Password as
+      '{{ cloudflare_access_mtls_p12_password_1p_prefix }}-<name>-key', and a PKCS#12 bundle built
+      for any entry with p12:true (password stored as
+      '{{ cloudflare_access_mtls_p12_password_1p_prefix }}-<name>-p12-password').
+      MANUAL AFTERWARDS: moving the .p12 to the device — there is no API for that.
+
+# DRY RUN ENDS HERE — by gating, not by stopping. Every task below carries
+# `cloudflare_access_mtls_apply | bool`, so a dry run skips them and returns to main.yml, which
+# still prints the report it promises, and the CALLER's play carries on. (`meta: end_play` used to
+# stand here: it ends the caller's ENTIRE play, not this role, so the report never printed and
+# anything the caller ran after this role silently did not happen.)
+
+# =============================================================================================
+# APPLY — per client, only those not already issued.
+# =============================================================================================
+- name: "APPLY — issue each outstanding client certificate"
+  ansible.builtin.include_tasks: _issue_one_client.yml
+  loop: "{{ _mtls_clients_todo }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.name }}"
+  when: cloudflare_access_mtls_apply | bool
+
+- name: APPLY summary — and what a human still has to do
+  ansible.builtin.debug:
+    msg: >-
+      Issued {{ _mtls_clients_todo | length }} client certificate(s):
+      {{ _mtls_clients_todo | map(attribute='name') | list }}.
+      Left untouched (already issued): {{ _mtls_clients_issued | map(attribute='name') | list }}.
+      MANUAL STEP, unavoidable: each .p12 in '{{ _mtls_workdir }}' must be moved to its device by
+      hand (AirDrop/email) and installed, then trusted in iOS Settings -> General -> VPN & Device
+      Management. iOS additionally requires the profile be enabled for the app. There is no
+      Cloudflare or Apple API that installs a client certificate on a device, so this step cannot
+      be codified — it is listed here rather than hidden.
+  when: cloudflare_access_mtls_apply | bool

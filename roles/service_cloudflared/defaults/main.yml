@@ -1,0 +1,43 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_cloudflared/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_cloudflared
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Container name. Give every host running its own cloudflared instance a
+# DISTINCT name (and cloudflared_config_dir) when the role is deployed more
+# than once, each instance with its own tunnel token pointing at a different
+# Cloudflare Tunnel.
+cloudflared_container_name__default: cloudflared-tunnel
+
+# Image, PINNED to a specific tag — never 'latest', so an upgrade is a reviewed change.
+cloudflared_image__default: cloudflare/cloudflared:2025.7.0
+
+# Directory holding the compose file on the target host. Must be unique per
+# cloudflared instance if a host runs more than one.
+cloudflared_config_dir__default: /opt/cloudflared
+
+# Docker network mode. `host` is REQUIRED when the tunnel's ingress points
+# at a service on the HOST's loopback (e.g. http://127.0.0.1:3001) — on a
+# bridge network `localhost` means the cloudflared container itself and
+# every request 502s. Tunnels that reach their origin by DNS name
+# (https://proxy.example.com) do not need it, so bridge is the default.
+cloudflared_network_mode__default: bridge
+
+# Edge transport. `quic` is cloudflared's default and works on most networks,
+# but on some paths EVERY dial fails with "timeout: no recent network activity"
+# while TCP and UDP 7844 to the same edge IPs are reachable — the symptom of a
+# path MTU too small for QUIC's datagrams. Set this to `http2` per host where
+# that happens; it uses the TCP/7844 path that already works.
+cloudflared_protocol__default: quic
+
+# Whether to actually converge the compose stack. Set false to STAGE config
+# only (render the compose file, do not start the container) — used during
+# parallel-build cutovers where a second running replica would make Cloudflare
+# load-balance live traffic to a not-yet-cut-over host.
+cloudflared_deploy__default: true

@@ -1,0 +1,40 @@
+# Assert the rendered artifacts are correct — especially that the dashboard is OFF by default.
+---
+- name: Verify rendered frps config
+  hosts: localhost
+  gather_facts: false
+  vars:
+    frp_deploy_dir: "/tmp/molecule-frp-render"
+  tasks:
+    - name: Read rendered frps.ini
+      ansible.builtin.slurp:
+        src: "{{ frp_deploy_dir }}/frps.ini"
+      register: _ini
+
+    - name: Decode
+      ansible.builtin.set_fact:
+        ini_text: "{{ _ini.content | b64decode }}"
+
+    - name: The token was rendered
+      ansible.builtin.assert:
+        that:
+          - "'TEST_TOKEN_NOT_REAL' in ini_text"
+        fail_msg: "frp_token was not rendered into frps.ini"
+
+    - name: The dashboard is DISABLED by default
+      ansible.builtin.assert:
+        that:
+          - "'dashboard_port' not in ini_text"
+          - "'dashboard_addr' not in ini_text"
+        fail_msg: "frps.ini exposes a dashboard by default — regression!"
+        success_msg: "Dashboard is off by default."
+
+    - name: Allow_ports is restricted to 80,443
+      ansible.builtin.assert:
+        that:
+          - "'allow_ports = 80,443' in ini_text"
+
+    - name: Clean up render dir
+      ansible.builtin.file:
+        path: "{{ frp_deploy_dir }}"
+        state: absent

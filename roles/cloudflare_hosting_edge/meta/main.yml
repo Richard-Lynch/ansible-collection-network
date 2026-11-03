@@ -1,0 +1,13 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  role_name: cloudflare_hosting_edge
+  author: Richard Lynch
+  description: >-
+    Publish a Cloudflare wildcard edge per hosting tier (a wildcard tunnel route, a proxied wildcard
+    DNS record and a wildcard Access application), order an Advanced Certificate Manager pack for
+    the wildcards, and prove before any write that the wildcards cannot capture an existing hostname.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [cloudflare, tunnel, access, dns, certificates]
+dependencies: []

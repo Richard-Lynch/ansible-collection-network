@@ -1,0 +1,185 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_traefik/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_traefik
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Deploy Traefik as a reverse proxy with Cloudflare DNS-01 certificates
+    description:
+      - 'Deploys Traefik v3 with Docker Compose: the static configuration, the compose project'
+      - and its environment file, and a directory of file-provider route files supplied by the
+      - caller. Certificates come from Let's Encrypt through the Cloudflare DNS-01 challenge,
+      - so a wildcard certificate is possible and no inbound port 80 is needed for issuance.
+      - 'Route files are DATA: the role ships one generic file (the HTTPS-redirect and'
+      - forwarded-proto middlewares its own dashboard router uses) and copies every file in
+      - traefik_dynamic_dir next to it. A route file the role used to deploy is not removed
+      - by deleting it from the source; list it in traefik_retired_dynamic_files.
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      traefik_container_name:
+        description:
+          - Container (and compose service) name.
+        type: str
+        required: false
+        default: traefik
+      traefik_config_dir:
+        description:
+          - Directory on the host holding the compose project, app.env, the static
+          - config (config/traefik.yml), the route files (config/dynamic/) and the ACME
+          - store (letsencrypt/). Empty means /opt/<traefik_container_name>.
+        type: str
+        required: false
+        default: ''
+      traefik_network:
+        description:
+          - Attachable docker network Traefik joins; containers routed by docker labels
+          - join it too. Created if absent.
+        type: str
+        required: false
+        default: traefik
+      traefik_image:
+        description:
+          - Image, pinned to a release tag; bump it deliberately.
+        type: str
+        required: false
+        default: traefik:v3.3
+      traefik_bind_address:
+        description:
+          - Host address the HTTP and HTTPS entrypoints are published on. The default
+          - publishes on loopback only, so nothing is reachable until the caller decides
+          - it should be. The dashboard router has no authentication of its own, so
+          - publishing on every interface (an empty string) also publishes the dashboard
+          - to everyone who can reach the host; restrict it with a firewall or by giving
+          - a specific address.
+        type: str
+        required: false
+        default: 127.0.0.1
+      traefik_http_port:
+        description:
+          - Host port for the web (HTTP) entrypoint, which redirects to HTTPS.
+        type: int
+        required: false
+        default: 80
+      traefik_https_port:
+        description:
+          - Host port for the websecure (HTTPS) entrypoint.
+        type: int
+        required: false
+        default: 443
+      traefik_timezone:
+        description:
+          - TZ for the container.
+        type: str
+        required: false
+        default: UTC
+      traefik_acme_resolver:
+        description:
+          - Name of the certificate resolver in the static config; route files refer to
+          - it as tls.certResolver.
+        type: str
+        required: false
+        default: letsencryptresolver
+      traefik_acme_email:
+        description:
+          - Contact address registered with Let's Encrypt.
+        type: str
+        required: true
+      traefik_cf_api_email:
+        description:
+          - Cloudflare account e-mail for the DNS-01 challenge (CF_API_EMAIL).
+        type: str
+        required: true
+      traefik_cf_dns_api_token:
+        description:
+          - Cloudflare API token with DNS edit rights on the certificate's zone
+          - (CF_DNS_API_TOKEN). Written to app.env; supply it from a secret store.
+        type: str
+        required: true
+        no_log: true
+      traefik_servers_insecure_skip_verify:
+        description:
+          - Disable TLS verification for EVERY https upstream (serversTransport). Only
+          - for backends with self-signed certificates and no better option; prefer a
+          - per-service serversTransport with the backend's CA.
+        type: bool
+        required: false
+        default: false
+      traefik_dashboard_host:
+        description:
+          - Hostname of the dashboard and API routers (for example
+          - traefik.example.com).
+        type: str
+        required: true
+      traefik_cert_domain:
+        description:
+          - Main domain of the certificate requested on the dashboard router (for
+          - example example.com).
+        type: str
+        required: true
+      traefik_cert_sans:
+        description:
+          - Subject alternative names for that certificate, comma-separated (for
+          - example *.example.com for a wildcard).
+        type: str
+        required: true
+      traefik_dynamic_dir:
+        description:
+          - Controller directory of file-provider route files (*.yml), copied verbatim
+          - into config/dynamic/ at mode 0644. Must exist; it may be empty. A file named
+          - like one the role ships (ssl.yml) is refused.
+        type: str
+        required: true
+      traefik_dynamic_templates_dir:
+        description:
+          - Optional controller directory of route TEMPLATES (*.j2), rendered into
+          - config/dynamic/ without the .j2 suffix at mode 0640 — the place for a route
+          - that carries a secret (a forwardAuth header, an upstream credential). Empty
+          - means none; a non-empty path must exist.
+        type: str
+        required: false
+        default: ''
+      traefik_retired_dynamic_files:
+        description:
+          - Basenames of route files to remove from config/dynamic/. The file provider
+          - serves whatever is in that directory, so a route deleted from the source
+          - stays live until it is listed here.
+        type: list
+        required: false
+        default: []
+        elements: str
+      traefik_forward_auth_network:
+        description:
+          - Optional existing docker network to a forward-auth service, joined at the
+          - fixed address traefik_forward_auth_traefik_ip so the auth service can tell
+          - Traefik's requests from anything else's. Empty means none. The network is
+          - 'not created here: it must already exist, be internal, and use'
+          - traefik_forward_auth_subnet (checked before the stack is deployed).
+        type: str
+        required: false
+        default: ''
+      traefik_forward_auth_subnet:
+        description:
+          - IPv4 subnet of traefik_forward_auth_network (CIDR).
+        type: str
+        required: false
+        default: ''
+      traefik_forward_auth_traefik_ip:
+        description:
+          - Traefik's fixed address on traefik_forward_auth_network, inside
+          - traefik_forward_auth_subnet.
+        type: str
+        required: false
+        default: ''
+      traefik_deploy:
+        description:
+          - Bring the stack up (and restart it on a route change). False renders and
+          - copies the configuration only, for tests.
+        type: bool
+        required: false
+        default: true

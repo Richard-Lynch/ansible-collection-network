@@ -1,0 +1,25 @@
+---
+# GENERATED from roles/hetzner_cloud_firewall/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate hetzner_cloud_firewall
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — hetzner_api_token must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "hetzner_api_token | default('') | length >= 1"
+    fail_msg: "hetzner_api_token violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: (value suppressed — no_log)"
+    quiet: true
+  when: hetzner_api_token is defined
+
+- name: "GUARD (generated) — hetzner_firewall_name must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "hetzner_firewall_name | default('') | length >= 1"
+    fail_msg: "hetzner_firewall_name violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ hetzner_firewall_name | default('(unset)') }}"
+    quiet: true
+  when: hetzner_firewall_name is defined

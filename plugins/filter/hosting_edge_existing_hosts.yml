@@ -1,0 +1,37 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_existing_hosts
+  short_description: Collect every hostname that exists today on a Cloudflare zone
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - The union of DNS record names, tunnel ingress hostnames and Access application domains (path stripped),
+      lower-cased, sorted and de-duplicated.
+    - Applications named in I(own_app_names) are left out (they are the ones being published), and so are
+      wildcard patterns, which are rules rather than names.
+  options:
+    _input:
+      description: DNS records as the Cloudflare API returns them (each with C(name)).
+      type: list
+      required: true
+    ingress_hostnames:
+      description: Hostnames from every tunnel's ingress rules.
+      type: list
+      required: true
+    apps:
+      description: Access applications as the Cloudflare API returns them.
+      type: list
+      required: true
+    own_app_names:
+      description: Names of the applications the caller itself owns.
+      type: list
+      required: true
+EXAMPLES: |
+  - name: Every existing hostname
+    ansible.builtin.set_fact:
+      existing_hosts: "{{ dns_records | richard_lynch.network.hosting_edge_existing_hosts(ingress_hosts, access_apps, ['my-wildcard-app']) }}"
+RETURN:
+  _value:
+    description: The existing hostnames, sorted.
+    type: list

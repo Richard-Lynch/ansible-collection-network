@@ -1,0 +1,70 @@
+---
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _base: /tmp/molecule-traefik
+  tasks:
+    - name: Read what the runs rendered
+      ansible.builtin.slurp:
+        src: "{{ _base }}/{{ item }}"
+      register: _r
+      loop:
+        - defaults/docker-compose.yml
+        - defaults/config/traefik.yml
+        - defaults/app.env
+        - full/docker-compose.yml
+        - full/config/traefik.yml
+        - full/config/dynamic/upstream-auth.yml
+        - refusals.json
+
+    - name: Index them
+      ansible.builtin.set_fact:
+        _f: "{{ dict(_r.results | map(attribute='item') | zip(_r.results | map(attribute='content') | map('b64decode'))) }}"
+
+    - name: List the route files of each run
+      ansible.builtin.find:
+        paths: "{{ _base }}/{{ item }}/config/dynamic"
+      register: _routes
+      loop: [defaults, full]
+
+    - name: Parse the compose projects
+      ansible.builtin.set_fact:
+        _cd: "{{ _f['defaults/docker-compose.yml'] | from_yaml }}"
+        _cf: "{{ _f['full/docker-compose.yml'] | from_yaml }}"
+        _sd: "{{ _f['defaults/config/traefik.yml'] | from_yaml }}"
+        _sf: "{{ _f['full/config/traefik.yml'] | from_yaml }}"
+
+    - name: Defaults — loopback bind, one network, verification on, the declared ACME contact
+      ansible.builtin.assert:
+        that:
+          - _cd.services.traefik.ports == ['127.0.0.1:80:80', '127.0.0.1:443:443']
+          - _cd.services.traefik.networks.keys() | list == ['traefik']
+          - _cd.networks.keys() | list == ['traefik']
+          - _sd.serversTransport.insecureSkipVerify == false
+          - _sd.certificatesResolvers.letsencryptresolver.acme.email == 'admin@example.com'
+          - "'CF_DNS_API_TOKEN=molecule-not-a-token' in _f['defaults/app.env']"
+          - "_cd.services.traefik.labels['traefik.http.routers.traefik-secure.tls.domains[0].sans'] == '*.example.com'"
+
+    - name: Full — every option reached its rendered file
+      ansible.builtin.assert:
+        that:
+          - _cf.services['edge-proxy'].ports == ['8080:80', '8443:443']
+          - _cf.services['edge-proxy'].networks['auth-net'].ipv4_address == '198.51.100.2'
+          - _cf.networks['auth-net'].external
+          - _sf.serversTransport.insecureSkipVerify == true
+          - _sf.certificatesResolvers.le.acme.email == 'admin@example.com'
+          - "'Basic dXNlcjptb2xlY3VsZS1wYXNz' in _f['full/config/dynamic/upstream-auth.yml']"
+
+    - name: Route files — the built-in one, the caller's, the rendered template; the retired one gone
+      ansible.builtin.assert:
+        that:
+          - _routes.results[0].files | map(attribute='path') | map('basename') | sort == ['ssl.yml', 'whoami.yml']
+          - _routes.results[1].files | map(attribute='path') | map('basename') | sort == ['ssl.yml', 'upstream-auth.yml', 'whoami.yml']
+          - (_routes.results[1].files | selectattr('path', 'search', 'upstream-auth') | first).mode == '0640'
+
+    - name: Refusals — each was stopped by the gate that names it
+      ansible.builtin.assert:
+        that:
+          - (_f['refusals.json'] | from_json).missing | bool
+          - (_f['refusals.json'] | from_json).dup | bool

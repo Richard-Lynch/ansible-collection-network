@@ -1,0 +1,125 @@
+---
+# Issue ONE client certificate. Included per-item from client.yml with loop_var `client`.
+#
+# Only reached for a client with no existing key in 1Password, so everything here is a first
+# issue. The CA key is already materialised in the workdir by ca.yml / the recovery path.
+#
+# The CA private key is never printed: it is read from a file by openssl and passed by PATH, and
+# the only task that puts key material in a variable (the 1Password store) is no_log.
+
+- name: Per-client file paths
+  ansible.builtin.set_fact:
+    _c_key: "{{ _mtls_workdir }}/{{ client.name }}.key"
+    _c_csr: "{{ _mtls_workdir }}/{{ client.name }}.csr"
+    _c_crt: "{{ _mtls_workdir }}/{{ client.name }}.pem"
+    _c_p12: "{{ _mtls_workdir }}/{{ client.name }}.p12"
+    _c_days: "{{ client.days | default(cloudflare_access_mtls_client_days) }}"
+    _c_1p_key: "{{ cloudflare_access_mtls_p12_password_1p_prefix }}-{{ client.name }}-key"
+    _c_1p_p12pw: "{{ cloudflare_access_mtls_p12_password_1p_prefix }}-{{ client.name }}-p12-password"
+
+- name: "Ensure the CA key is present before signing {{ client.name }}"
+  # A clear failure here beats openssl's own "unable to load CA private key". The CA key only
+  # exists in the workdir after ca.yml ran in this same play (or recovered it from 1Password), so
+  # calling `client` standalone on a fresh controller needs `ca` first.
+  ansible.builtin.stat:
+    path: "{{ _mtls_ca_key }}"
+  register: _c_ca_key_stat
+
+- name: "HARD GATE — CA signing key must be on disk for {{ client.name }}"
+  ansible.builtin.assert:
+    that:
+      - _c_ca_key_stat.stat.exists
+    fail_msg: >-
+      The CA private key is not present at {{ _mtls_ca_key }}, so '{{ client.name }}' cannot be
+      signed. Run this role with cloudflare_access_mtls_action=ca first in the same play — that
+      entrypoint either generates the CA or recovers its key from 1Password into the workdir.
+    quiet: true
+
+- name: "Generate the client private key for {{ client.name }}"
+  # Key goes to the FILE named by -out; argv and result carry a path only.
+  ansible.builtin.command:
+    cmd: "openssl genrsa -out {{ _c_key | quote }} {{ cloudflare_access_mtls_client_key_bits }}"
+    creates: "{{ _c_key }}"
+
+- name: "Tighten the client key's mode for {{ client.name }}"
+  ansible.builtin.file:
+    path: "{{ _c_key }}"
+    mode: "0600"
+
+- name: "Create the CSR for {{ client.name }}"
+  # The CN is the ONLY field Cloudflare's `common_name` policy matches on, so it is taken verbatim
+  # from the declaration. Quoted because a CN legitimately contains spaces.
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -new -key {{ _c_key | quote }} -out {{ _c_csr | quote }}
+      -subj {{ ('/CN=' ~ client.common_name) | quote }}
+    creates: "{{ _c_csr }}"
+
+- name: "Sign {{ client.name }} with the client CA"
+  # -CAcreateserial keeps a serial file in the workdir; it is gitignored along with everything
+  # else there. Each client gets a distinct serial, which is what makes per-device revocation
+  # meaningful (see the README).
+  ansible.builtin.command:
+    cmd: >-
+      openssl x509 -req -in {{ _c_csr | quote }}
+      -CA {{ _mtls_ca_crt | quote }} -CAkey {{ _mtls_ca_key | quote }}
+      -CAcreateserial -out {{ _c_crt | quote }}
+      -days {{ _c_days }} -sha256
+    creates: "{{ _c_crt }}"
+
+- name: "VERIFY — the signed certificate's CN is what was declared for {{ client.name }}"
+  # Reads the cert back rather than trusting openssl's exit code. A CN that silently differs from
+  # the declaration produces a certificate the Access policy will never match, and the symptom
+  # would be an authentication failure on the device — far from here.
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ _c_crt | quote }} -noout -subject"
+  register: _c_subject
+  changed_when: false
+
+- name: "HARD GATE — CN must match the declaration for {{ client.name }}"
+  ansible.builtin.assert:
+    that:
+      - client.common_name in _c_subject.stdout
+    fail_msg: >-
+      The certificate signed for '{{ client.name }}' does not carry the declared common_name
+      '{{ client.common_name }}' — openssl reports subject '{{ _c_subject.stdout }}'. The Access
+      policy matches on CN, so this certificate would be rejected at the edge. Delete
+      {{ _c_crt }} and re-run.
+    quiet: true
+
+- name: "VERIFY — the certificate was actually signed by the client CA for {{ client.name }}"
+  # Proves the chain rather than assuming it. A cert signed by the wrong CA (a stale workdir copy
+  # from a previous, retired CA) verifies as self-inconsistent here instead of failing on-device.
+  ansible.builtin.command:
+    cmd: "openssl verify -CAfile {{ _mtls_ca_crt | quote }} {{ _c_crt | quote }}"
+  register: _c_verify
+  changed_when: false
+  failed_when: _c_verify.rc != 0
+
+- name: "Store the client private key in 1Password for {{ client.name }}"
+  # This is the authoritative copy and the idempotency key: its presence is what client.yml reads
+  # to decide the cert is already issued. no_log because the VALUE here is the key itself, passed
+  # as an argument rather than consumed from a file.
+  ansible.builtin.include_role:
+    name: richard_lynch.common.secrets_manager
+    apply:
+      no_log: true
+  vars:
+    secrets_manager_action: ensure
+    secrets_manager_title: "{{ _c_1p_key }}"
+    secrets_manager_vault: "{{ cloudflare_access_mtls_vault }}"
+    secrets_manager_value: "{{ lookup('ansible.builtin.file', _c_key) }}"
+    secrets_manager_notes: >-
+      Cloudflare Access mTLS CLIENT private key for '{{ client.name }}'
+      (CN={{ client.common_name }}), signed by CA '{{ cloudflare_access_mtls_ca_name }}', valid
+      {{ _c_days }} days from issue. Intended hostname(s):
+      {{ client.hostnames | default([]) | join(', ') | default('(none declared)', true) }}.
+      Presenting this key + its certificate satisfies the `non_identity` + `common_name` Access
+      policy for those hostnames. REVOKE ONE DEVICE: archive this item, remove the client's entry
+      from the declared list, and remove its CN from the Access policy — see
+      roles/cloudflare_access_mtls/README.md. Issued by roles/cloudflare_access_mtls
+      (action=client).
+
+- name: "Build the iOS PKCS#12 bundle for {{ client.name }}"
+  ansible.builtin.include_tasks: _bundle_p12.yml
+  when: client.p12 | default(false) | bool

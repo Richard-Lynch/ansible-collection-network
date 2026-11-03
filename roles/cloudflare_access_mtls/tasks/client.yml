@@ -1,0 +1,61 @@
+---
+# Issue the DECLARED client certificates from the CA.
+#
+# THE SEAM. Every certificate this entrypoint issues comes from `cloudflare_access_mtls_clients`,
+# a list in the calling play's vars. Adding a device is ONE
+# MORE ENTRY in that list plus its hostname in `cloudflare_access_mtls_hostnames`. No task here
+# knows the name of any particular client, and nothing below branches on one.
+#
+# IDEMPOTENCE. A client certificate is identified by its 1Password item, not by the workdir: the
+# workdir is scratch and may be empty on a fresh controller. An existing item means the cert was
+# already issued and is NOT reissued — reissuing silently invalidates the copy already on the
+# device while reporting success. Rotating one device deliberately is `remove` the item, re-run
+# (see the README's revocation section).
+#
+# WHAT IS MANUAL, STATED PLAINLY: getting the .p12 onto the device. There is no API for that. The
+# role produces the bundle and its password in 1Password; a human AirDrops/emails it and taps
+# through the iOS profile installer. Nothing here pretends otherwise.
+
+- name: Validate every declared client has the fields the role needs
+  # Fails on the DECLARATION rather than part-way through issuing, so a typo cannot leave half the
+  # fleet issued. `common_name` is the field the Access policy matches on, so an entry missing it
+  # would produce a certificate that can never satisfy a policy.
+  ansible.builtin.assert:
+    that:
+      - item.name | default('') | length > 0
+      - item.common_name | default('') | length > 0
+    fail_msg: >-
+      Declared client {{ item | to_json }} is missing `name` and/or `common_name`. Every entry in
+      cloudflare_access_mtls_clients needs both: `name` keys the filenames and the 1Password
+      items, and `common_name` is the CN the Access `common_name` policy matches on.
+    quiet: true
+  loop: "{{ cloudflare_access_mtls_clients }}"
+  loop_control:
+    label: "{{ item.name | default('(unnamed)') }}"
+
+- name: HARD GATE — the CA must exist before any client can be signed
+  # Without this the openssl signing step below fails per-client with a confusing file-not-found,
+  # which reads as a broken role rather than "run action=ca first".
+  ansible.builtin.assert:
+    that:
+      - _mtls_ca_exists | bool
+    fail_msg: >-
+      No CA named '{{ cloudflare_access_mtls_ca_name }}' is registered in Cloudflare, so no client
+      certificate issued now could be validated by Access. Run this role with
+      cloudflare_access_mtls_action=ca and cloudflare_access_mtls_apply=true first.
+    quiet: true
+  when: cloudflare_access_mtls_apply | bool
+
+- name: "PREVIEW — no CA yet, so nothing further can be planned"
+  ansible.builtin.debug:
+    msg: >-
+      (DRY RUN) No CA named '{{ cloudflare_access_mtls_ca_name }}' is registered yet. Once
+      cloudflare_access_mtls_action=ca is applied, this step will
+      issue the declared client certificates from it.
+  when:
+    - not (cloudflare_access_mtls_apply | bool)
+    - not (_mtls_ca_exists | bool)
+
+- name: Reconcile against the existing CA
+  ansible.builtin.include_tasks: _client_existing.yml
+  when: _mtls_ca_exists | bool

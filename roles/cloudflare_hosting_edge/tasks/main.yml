@@ -1,0 +1,260 @@
+---
+# cloudflare_hosting_edge (main) — the wildcard edge for the hosting tiers, published ONCE.
+#
+# Per tier (dev, prod): a wildcard ingress rule on the tunnel, a proxied wildcard CNAME, and a
+# wildcard Access app (owner SSO allow + a service-token non_identity). After this, an app needs no
+# DNS, tunnel or Access step.
+#
+# A WILDCARD IS THE MOST DANGEROUS THING TO PUBLISH ON A SHARED ZONE, because it covers names that
+# do not exist yet AND names that do. So before any write this role proves it cannot capture an
+# existing hostname (see the gates), and after the write it proves the proof held.
+#
+# GENERATE-DON'T-APPLY: without cloudflare_hosting_edge_apply the role reads, gates and reports.
+
+- name: Load this entrypoint's generated defaults
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/defaults/main.yml"
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Apply the generated argspec guards
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Derive the wildcards, the routes and the app names
+  ansible.builtin.set_fact:
+    _cfhe_api: "https://api.cloudflare.com/client/v4"
+    _cfhe_wildcards: "{{ cloudflare_hosting_edge_tiers.values() | map(attribute='suffix') | map('regex_replace', '^', '*.') | list }}"
+
+- name: Build the wanted ingress rules and app specs
+  ansible.builtin.set_fact:
+    _cfhe_wanted_rules: >-
+      {{ _cfhe_wanted_rules | default([]) + [{
+           'hostname': '*.' ~ item.value.suffix,
+           'service': 'http://' ~ cloudflare_hosting_edge_origin ~ ':' ~ item.value.entrypoint_port
+         }] }}
+    _cfhe_apps: >-
+      {{ _cfhe_apps | default([]) + [{
+           'tier': item.key,
+           'name': 'hosting-' ~ item.key ~ '-wildcard',
+           'domain': '*.' ~ item.value.suffix,
+           'token_name': 'hosting-' ~ item.key ~ '-client',
+           'id_item': item.value.cf_id_item,
+           'secret_item': item.value.cf_secret_item
+         }] }}
+  loop: "{{ cloudflare_hosting_edge_tiers | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: HARD GATE — a token source is configured
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cloudflare_hosting_edge_api_token | default('')) | length > 0
+        or ((cloudflare_hosting_edge_token_item | default('')) | length > 0
+            and (cloudflare_hosting_edge_op_vault | default('')) | length > 0)
+    fail_msg: >-
+      Set cloudflare_hosting_edge_api_token, or cloudflare_hosting_edge_token_item plus
+      cloudflare_hosting_edge_op_vault (1Password).
+    quiet: true
+  no_log: true
+
+- name: Resolve the API token
+  # The caller's token when passed; otherwise the 1Password item (the lookup is only evaluated on
+  # that branch).
+  ansible.builtin.set_fact:
+    _cfhe_token: >-
+      {{ cloudflare_hosting_edge_api_token
+         if (cloudflare_hosting_edge_api_token | default('')) | length > 0
+         else lookup('richard_lynch.common.onepassword_cached', cloudflare_hosting_edge_token_item,
+                     field=cloudflare_hosting_edge_token_field, vault=cloudflare_hosting_edge_op_vault) }}
+  no_log: true
+
+- name: HARD GATE — the token read back non-empty
+  # An empty bearer yields 400/401, indistinguishable from a real permissions answer, so every
+  # status below would be meaningless.
+  ansible.builtin.assert:
+    that:
+      - _cfhe_token | default('') | length > 0
+    fail_msg: "The Cloudflare token (cloudflare_hosting_edge_api_token, or 1Password item {{ cloudflare_hosting_edge_token_item | default('(unset)') }}) is EMPTY."
+    quiet: true
+  no_log: true
+
+# =================================================================================================
+# READ: everything that already exists, parsed explicitly (content | from_json, never .json)
+# =================================================================================================
+- name: Read every Access app
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/access/apps?per_page=1000"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_apps_raw
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+
+- name: Read the tunnel's current configuration
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/cfd_tunnel/{{ cloudflare_hosting_edge_tunnel_id }}/configurations"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_tunnel_raw
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+
+- name: List every tunnel (their ingress hostnames also count as existing names)
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/cfd_tunnel?is_deleted=false&per_page=100"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_tunnels_raw
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+
+- name: Read each tunnel's configuration
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/accounts/{{ cloudflare_hosting_edge_account_id }}/cfd_tunnel/{{ item.id }}/configurations"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_each_tunnel
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+  loop: "{{ (_cfhe_tunnels_raw.content | from_json).result | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read every DNS record in the zone
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/dns_records?per_page=5000"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_dns_raw
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+
+- name: Parse the listings
+  ansible.builtin.set_fact:
+    _cfhe_app_list: "{{ (_cfhe_apps_raw.content | from_json).result | default([], true) }}"
+    _cfhe_tunnel_cfg: "{{ (_cfhe_tunnel_raw.content | from_json).result.config | default({}, true) }}"
+    _cfhe_dns_list: "{{ (_cfhe_dns_raw.content | from_json).result | default([], true) }}"
+    _cfhe_dns_total: "{{ (_cfhe_dns_raw.content | from_json).result_info.total_count | default(-1) }}"
+    _cfhe_tunnel_ingress_all: >-
+      {{ _cfhe_each_tunnel.results
+         | map(attribute='content') | map('from_json')
+         | map(attribute='result') | map(attribute='config', default={})
+         | map(attribute='ingress', default=[]) | flatten
+         | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}
+
+- name: HARD GATE — every listing parsed into something, and the DNS listing is COMPLETE
+  # A capture check over a truncated or unparseable listing passes vacuously: "nothing under this
+  # wildcard" is exactly what an empty list says. The account is known to hold the zone-wide
+  # wildcard app, at least one tunnel and DNS records, so empty means unread.
+  ansible.builtin.assert:
+    that:
+      - _cfhe_app_list | length > 0
+      - _cfhe_tunnel_cfg.ingress | default([]) | length > 0
+      - _cfhe_dns_list | length > 0
+      - _cfhe_dns_total | int == (_cfhe_dns_list | length)
+      - _cfhe_tunnel_ingress_all | length > 0
+    fail_msg: >-
+      A Cloudflare listing came back empty or truncated (apps={{ _cfhe_app_list | length }},
+      tunnel ingress={{ _cfhe_tunnel_cfg.ingress | default([]) | length }},
+      dns={{ _cfhe_dns_list | length }} of {{ _cfhe_dns_total }},
+      all-tunnel hostnames={{ _cfhe_tunnel_ingress_all | length }}). Refusing to decide that nothing
+      sits under a wildcard from a listing that may be incomplete.
+    quiet: true
+
+- name: Locate the zone-wide wildcard app before any write
+  ansible.builtin.set_fact:
+    _cfhe_zone_app_before: >-
+      {{ _cfhe_app_list | selectattr('id', 'equalto', cloudflare_hosting_edge_zone_app_id)
+         | list | first | default(None) }}
+
+- name: HARD GATE — the zone-wide wildcard app exists (the before-state this role asserts unchanged)
+  ansible.builtin.assert:
+    that:
+      - _cfhe_zone_app_before is not none
+    fail_msg: "Zone-wide wildcard Access app {{ cloudflare_hosting_edge_zone_app_id }} not found."
+    quiet: true
+
+- name: HARD GATE — each tier wildcard is a wildcard STRICTLY BELOW the zone-wide wildcard, never that wildcard itself
+  # A tier whose suffix is the zone itself would make this role overwrite the zone's default auth
+  # posture. Compared against the zone-wide app READ ABOVE rather than a literal, so the role
+  # carries no installation fact: that wildcard is `*.<zone>`, and a tier wildcard must be
+  # `*.<x>.<zone>`.
+  ansible.builtin.assert:
+    that:
+      - item.domain.startswith('*.')
+      - item.domain != _cfhe_zone_app_before.domain
+      - item.domain.endswith(_cfhe_zone_app_before.domain[1:])
+    fail_msg: >-
+      {{ item.domain }} is not a wildcard strictly below the zone-wide wildcard
+      {{ _cfhe_zone_app_before.domain }} (need *.<tier>.<zone>).
+    quiet: true
+  loop: "{{ _cfhe_apps }}"
+  loop_control:
+    label: "{{ item.domain }}"
+
+# =================================================================================================
+# THE CAPTURE PROOF (before any write)
+# =================================================================================================
+- name: Collect every EXISTING hostname, excluding what this role itself owns
+  ansible.builtin.set_fact:
+    _cfhe_existing_hosts: >-
+      {{ _cfhe_dns_list | richard_lynch.network.hosting_edge_existing_hosts(
+           _cfhe_tunnel_ingress_all, _cfhe_app_list, _cfhe_apps | map(attribute='name') | list) }}
+
+- name: HARD GATE — no existing DNS name, tunnel hostname or Access app domain falls under a new wildcard
+  # THE gate this role exists for. If `foo.dev.example.com` already exists, the dev wildcard would
+  # re-authenticate it with different policies; if an existing app BYPASSES auth for a name under
+  # the wildcard, the wildcard would silently stop protecting it.
+  ansible.builtin.assert:
+    that:
+      - _cfhe_captured | length == 0
+    fail_msg: >-
+      The new wildcard(s) {{ _cfhe_wildcards }} would CAPTURE existing hostname(s) {{ _cfhe_captured }}.
+      Rename or remove those first; do not publish the wildcard over them.
+    success_msg: >-
+      None of the {{ _cfhe_existing_hosts | length }} existing hostnames falls under
+      {{ _cfhe_wildcards }}.
+    quiet: false
+  vars:
+    _cfhe_captured: "{{ _cfhe_wildcards | richard_lynch.network.hosting_edge_captured(_cfhe_existing_hosts) }}"
+
+- name: Simulate the Access apps AFTER the write
+  ansible.builtin.set_fact:
+    _cfhe_apps_after_sim: >-
+      {{ (_cfhe_app_list | rejectattr('name', 'in', _cfhe_apps | map(attribute='name') | list) | list)
+         + _cfhe_apps }}
+
+- name: HARD GATE — the winning Access app for every existing hostname is identical before and after
+  # Defence in depth behind the capture gate, computed on the real app list with the new apps
+  # added: if specificity ever resolves differently from what the capture gate assumes (a path app,
+  # a multi-domain app), this is the check that notices.
+  ansible.builtin.assert:
+    that:
+      - _cfhe_changed | length == 0
+    fail_msg: >-
+      Adding the wildcard Access app(s) would change which app decides these existing hostnames:
+      {{ _cfhe_changed }}.
+    success_msg: "All {{ _cfhe_existing_hosts | length }} existing hostnames keep the same winning Access app."
+    quiet: false
+  vars:
+    _cfhe_changed: "{{ _cfhe_app_list | richard_lynch.network.hosting_edge_winner_diff(_cfhe_apps_after_sim, _cfhe_existing_hosts) }}"
+
+- name: Report the plan
+  ansible.builtin.debug:
+    msg:
+      - "{{ 'APPLY' if cloudflare_hosting_edge_apply | bool else 'PREVIEW (cloudflare_hosting_edge_apply=true to act)' }}"
+      - "tunnel routes: {{ _cfhe_wanted_rules | map(attribute='hostname') | zip(_cfhe_wanted_rules | map(attribute='service')) | list }}"
+      - "DNS: {{ _cfhe_wildcards }} -> CNAME {{ cloudflare_hosting_edge_tunnel_id }}.cfargotunnel.com (proxied)"
+      - "Access apps: {{ _cfhe_apps | map(attribute='name') | list }} (SSO allow + service token)"
+      - "zone-wide wildcard app {{ cloudflare_hosting_edge_zone_app_id }}: NOT modified"
+
+- name: Apply and read back
+  ansible.builtin.include_tasks: apply.yml
+  when: cloudflare_hosting_edge_apply | bool

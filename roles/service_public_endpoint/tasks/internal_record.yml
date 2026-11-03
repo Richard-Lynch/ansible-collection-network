@@ -1,0 +1,113 @@
+---
+# The internal half: a record in the human-authored zone, written through the SAME pipeline as
+# every other human-authored record.
+#
+# WHY VIA service_bind9_dns AND NOT A DIRECT ZONE WRITE: two writers to one zone with different
+# blockinfile markers is exactly how a CNAME and an A record end up on one name, which makes bind9
+# refuse to load the whole zone. Reusing the existing task interface keeps one writer.
+
+- name: Write the record
+  ansible.builtin.include_role:
+    name: richard_lynch.network.service_bind9_dns
+    tasks_from: "{{ 'add_cname_to_domain' if _endpoint_record_type == 'CNAME' else 'add_host_to_domain' }}"
+  vars:
+    bind9_parent_domain: "{{ _endpoint_zone }}"
+    bind9_sub_domain: "{{ endpoint_name }}"
+    bind9_domain: "{{ _endpoint_cname_target | default(omit) }}"
+    bind9_host_ip: "{{ endpoint_a_value | default(omit) }}"
+    bind9_state: present
+
+# A WRITE IS NOT A LOAD, and the reload is a HANDLER — which by default fires at PLAY END, after
+# the read-back below. If an earlier run wrote the block to the zone file and then failed its
+# read-back before the handler fired, bind9 never loaded it. Every later run then finds the block
+# already present (blockinfile: unchanged), notifies nothing, and fails the same gate forever — a state the play could not leave on its own.
+# So: flush the write's own reload first, and if the name is STILL not served, force one.
+- name: Let the write's own reload happen before reading it back
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the record back from the running server
+  # Never trust the write. blockinfile reports changed on a file edit; only a query proves the
+  # server loaded it.
+  ansible.builtin.command:
+    cmd: >-
+      dig +norecurse +short @{{ _endpoint_bind9_addr }}
+      {{ endpoint_name }}.{{ _endpoint_zone }}
+  register: _readback
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 5
+  until: (_readback.rc | default(1)) == 0 and (_readback.stdout | default('') | trim | length) > 0 and not (_readback.stdout | default('') is search('(?m)^;;'))
+
+- name: Force bind9 to load a record that is on disk but not being served
+  # Reached only when the record is declared, written, and still absent from the running server —
+  # i.e. the zone file and the daemon disagree. `changed` is honest: the handler restarts bind9.
+  # The handler is service_bind9_dns's own, so its paths resolve in that role's scope.
+  ansible.builtin.debug:
+    msg: >-
+      {{ endpoint_name }}.{{ _endpoint_zone }} is not served after the write; restarting bind9 so
+      it loads the zone file as written.
+  changed_when: true
+  notify: Restart bind9
+  when: not ((_readback.rc | default(1)) == 0 and (_readback.stdout | default('') | trim | length) > 0 and not (_readback.stdout | default('') is search('(?m)^;;')))
+
+- name: Apply that restart now
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the record back again after a forced reload
+  ansible.builtin.command:
+    cmd: >-
+      dig +norecurse +short @{{ _endpoint_bind9_addr }}
+      {{ endpoint_name }}.{{ _endpoint_zone }}
+  register: _readback_forced
+  changed_when: false
+  failed_when: false
+  retries: 6
+  delay: 5
+  until: (_readback_forced.rc | default(1)) == 0 and (_readback_forced.stdout | default('') | trim | length) > 0 and not (_readback_forced.stdout | default('') is search('(?m)^;;'))
+  when: not ((_readback.rc | default(1)) == 0 and (_readback.stdout | default('') | trim | length) > 0 and not (_readback.stdout | default('') is search('(?m)^;;')))
+
+- name: Keep whichever read-back is the current one
+  ansible.builtin.set_fact:
+    _readback: "{{ _readback_forced }}"
+  when: _readback_forced is not skipped
+
+- name: HARD GATE — the name must resolve, and the zone must still load
+  # Two conditions, and the second is the important one: a CNAME/A collision does not break only
+  # this name, it stops the ENTIRE zone loading. So a bare "does my name resolve" check would pass
+  # in some orderings while the zone was already broken for everything else.
+  ansible.builtin.assert:
+    that:
+      # dig prints its DIAGNOSTICS to stdout (`;; connection timed out`), so non-empty stdout
+      # alone would read a failed lookup as a resolved name — rc and the `;;` reject close that.
+      - (_readback.rc | default(1)) == 0
+      - (_readback.stdout | trim | length) > 0
+      - not (_readback.stdout is search('(?m)^;;'))
+      - not (_readback.stdout is search('SERVFAIL'))
+    fail_msg: >-
+      {{ endpoint_name }}.{{ _endpoint_zone }} does not resolve after writing it
+      (got: '{{ _readback.stdout | default('') | trim }}'). If the whole zone stopped answering,
+      suspect a CNAME/A collision — check `named-checkzone {{ _endpoint_zone }}` on the DNS guest.
+    success_msg: >-
+      {{ endpoint_name }}.{{ _endpoint_zone }} -> {{ _readback.stdout | trim }}
+    quiet: true
+
+- name: Confirm the zone as a whole still loads
+  # The blast-radius check. Asserted separately from the name above so the failure message can say
+  # WHICH problem it is.
+  ansible.builtin.command:
+    cmd: "dig +norecurse +short @{{ _endpoint_bind9_addr }} SOA {{ _endpoint_zone }}"
+  register: _zone_soa
+  changed_when: false
+  failed_when: false
+
+- name: HARD GATE — the zone must still be serving
+  ansible.builtin.assert:
+    that:
+      - (_zone_soa.stdout | trim | length) > 0
+    fail_msg: >-
+      {{ _endpoint_zone }} no longer answers for its SOA — the zone has stopped loading, which
+      takes EVERY name in it down, not just {{ endpoint_name }}. Almost certainly a CNAME/A
+      collision. Revert the record and run `named-checkzone` on the DNS guest.
+    success_msg: "{{ _endpoint_zone }} still loads (SOA answers)."
+    quiet: true

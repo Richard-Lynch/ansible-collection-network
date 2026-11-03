@@ -1,0 +1,65 @@
+# Assert the rendered compose file matches the security-relevant expectations: image PINNED (never
+# `latest`), TUNNEL_TOKEN rendered, `tunnel run` command used (ingress routing stays in the Cloudflare
+# dashboard — this role never writes a local ingress config file).
+---
+- name: Verify rendered cloudflared compose
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloudflared_config_dir: "/tmp/molecule-cloudflared-render"
+  tasks:
+    - name: Read rendered docker-compose.yml
+      ansible.builtin.slurp:
+        src: "{{ cloudflared_config_dir }}/docker-compose.yml"
+      register: _compose
+
+    - name: Decode
+      ansible.builtin.set_fact:
+        compose_text: "{{ _compose.content | b64decode }}"
+
+    - name: Image is pinned to a specific tag, never latest
+      ansible.builtin.assert:
+        that:
+          - "'cloudflare/cloudflared:2025.7.0' in compose_text"
+          - "'cloudflared:latest' not in compose_text"
+        fail_msg: "cloudflared image is not pinned to the expected tag (or latest crept in)."
+
+    - name: Tunnel token was rendered into the environment
+      ansible.builtin.assert:
+        that:
+          - "'TUNNEL_TOKEN=TEST_TOKEN_NOT_REAL' in compose_text"
+        fail_msg: "cloudflared_tunnel_token was not rendered into the compose file."
+
+    - name: Runs `tunnel ... run` — no local ingress config file is used
+      # Asserts the two words SEPARATELY, and the absence of a config flag, rather than the literal
+      # substring 'tunnel run'. They stopped being adjacent when `--protocol {{ cloudflared_protocol }}`
+      # was inserted between them, and an adjacency check failed on a role change that was entirely
+      # correct.
+      #
+      # The name of this task states the property that actually matters — dashboard-managed ingress,
+      # no local config.yml — so that is what is checked: the subcommand is `run`, and no
+      # --config/-c is passed. Matching adjacent words was only ever a proxy for it.
+      ansible.builtin.assert:
+        that:
+          - "'command: tunnel' in compose_text"
+          - "' run' in compose_text"
+          - "'--config' not in compose_text"
+          - "'config.yml' not in compose_text"
+        fail_msg: >-
+          cloudflared is not running in token+dashboard-ingress mode. Expected `command: tunnel
+          ... run` with no --config/config.yml. Rendered command line:
+          {{ compose_text | regex_search('command:.*') | default('(no command: line)') }}
+        success_msg: "Confirmed: dashboard-managed ingress mode (no local config.yml)."
+
+    - name: No inbound port is published (the whole point — cloudflared only dials OUT)
+      ansible.builtin.assert:
+        that:
+          - "'ports:' not in compose_text"
+        fail_msg: >-
+          cloudflared compose publishes a host port — it should never need one, it only makes
+          outbound connections to Cloudflare's edge.
+
+    - name: Clean up render dir
+      ansible.builtin.file:
+        path: "{{ cloudflared_config_dir }}"
+        state: absent

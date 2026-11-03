@@ -1,0 +1,38 @@
+# Parse/check tier. This role is PURE API CALLS against Hetzner
+# Cloud, so a scenario cannot and must not reach the real endpoint — a test that mutated a live
+# firewall would be far worse than no test.
+#
+# What it CAN test, and what actually carries the risk, is the GUARD LOGIC that decides whether it
+# is safe to act at all. The lockout guard in particular: set_rules REPLACES the whole rule set, so
+# a declaration omitting port 22 removes SSH from a host whose only access path is SSH. That guard
+# firing correctly is the difference between a refused play and a bricked public server.
+#
+# So the scenario calls the REAL role (hetzner_firewall_apply=false, so it never writes) with
+# deliberately-bad declarations and asserts each guard fires — rather than re-deriving the role's
+# own filter expressions over a hand-typed stub, which would assert the copy against itself and stay
+# green through a real regression.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # The scenario CALLS the role, so the roles directory must be on the search path.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # Two trees: installed dependency collections (ansible.posix, community.general, ...), then the
+    # collection this role belongs to. Pointing at only the second resolves no dependency, and the
+    # failure shows only where the venv does not bundle them in site-packages.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

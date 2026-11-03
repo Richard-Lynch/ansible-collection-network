@@ -1,0 +1,177 @@
+---
+# The public half: a proxied DNS record in Cloudflare, an entry on the tunnel's ingress list, and a
+# gate proving Access actually authenticates the name.
+#
+# ONLY runs when endpoint_public is true. Publishing is opt-in per service, never a default: an
+# internal-only name that someone forgot to publish is a nuisance, a published machine interface
+# nobody meant to expose is not.
+
+- name: Resolve the Cloudflare token
+  # A NARROWLY scoped token, never a broad read-write one. A token that can mint further tokens has an
+  # unbounded blast radius and must not be what routine plays authenticate with.
+  # endpoint_cf_api_token when the caller passes one; otherwise the 1Password item (the lookup is
+  # only evaluated on that branch).
+  ansible.builtin.set_fact:
+    _cf_token: >-
+      {{ endpoint_cf_api_token if _endpoint_cf_token_direct | bool
+         else lookup('richard_lynch.common.onepassword_cached', _endpoint_cf_token_item,
+                     field='credential', vault=_endpoint_op_vault) }}
+  no_log: true
+
+# EVERY request below carries the token in an Authorization header, so every one is no_log. `uri`
+# declares no no_log for `headers`, so whether a header reaches the output is left to the Ansible
+# version, the verbosity and the callback (measured 2026-11-03, ansible-core 2.21: a failed call
+# printed no header with the default or jsonl callback, -vvv included — but nothing in the module
+# guarantees that, and this role supports 2.19+). no_log makes it a property of the task. The gates
+# after each call assert on status and content, so a failure is still explained.
+
+- name: Read the current tunnel configuration
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/accounts/{{ _endpoint_cf_account }}/cfd_tunnel/{{ _tunnel_id }}/configurations"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+    return_content: true
+  register: _tunnel_before
+  no_log: true # the request carries the token in a header
+  changed_when: false
+
+- name: Capture the ingress list exactly as it stands
+  ansible.builtin.set_fact:
+    _ingress_before: "{{ _tunnel_before.json.result.config.ingress | default([]) }}"
+
+- name: Merge our hostname into the ingress list
+  # Extracted so molecule can exercise the real merge — see tasks/_ingress_merge.yml.
+  ansible.builtin.include_tasks: _ingress_merge.yml
+
+# Written ONLY when the merge changed the list. It used to PUT unconditionally with
+# `changed_when: true`, so re-running a converged publish play reported one change per endpoint
+# while writing back the exact list it had just read. The merge carries every existing rule through
+# verbatim (_ingress_merge.yml), so an equal list means our hostname is already routed as declared.
+# The read-back and its gate below still run either way.
+- name: Write the ingress list back (only when the merge changed it)
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/accounts/{{ _endpoint_cf_account }}/cfd_tunnel/{{ _tunnel_id }}/configurations"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+      Content-Type: application/json
+    body_format: json
+    body:
+      config: "{{ _tunnel_before.json.result.config | combine({'ingress': _ingress_after}) }}"
+    status_code: [200]
+    return_content: true
+  register: _tunnel_put
+  no_log: true # the request carries the token in a header
+  changed_when: true
+  when: _ingress_after != _ingress_before
+
+- name: Read the tunnel configuration back
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/accounts/{{ _endpoint_cf_account }}/cfd_tunnel/{{ _tunnel_id }}/configurations"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+    return_content: true
+  register: _tunnel_after
+  no_log: true # the request carries the token in a header
+  changed_when: false
+
+- name: HARD GATE — the controller stored every hostname, including the pre-existing ones
+  ansible.builtin.assert:
+    that:
+      - _fqdn in _stored
+      - (_ingress_before | selectattr('hostname', 'defined') | map(attribute='hostname') | list | difference(_stored)) | length == 0
+    fail_msg: >-
+      Tunnel read-back mismatch. Stored: {{ _stored }}.
+      Missing: {{ _ingress_before | selectattr('hostname', 'defined')
+                  | map(attribute='hostname') | list | difference(_stored) }}.
+      If pre-existing hostnames are missing they are OFFLINE NOW — restore them from
+      _ingress_before before doing anything else.
+    success_msg: "Tunnel now serves {{ _stored | length }} hostname(s), including {{ _fqdn }}."
+    quiet: true
+  vars:
+    _stored: >-
+      {{ _tunnel_after.json.result.config.ingress | default([])
+         | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}
+
+- name: Ensure the public DNS record exists and is proxied
+  # Proxied (orange-cloud) is what puts the request through Cloudflare at all — a grey-cloud record
+  # would publish the tunnel hostname while bypassing Access entirely.
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/zones/{{ _endpoint_cf_zone }}/dns_records"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+      Content-Type: application/json
+    body_format: json
+    body:
+      type: CNAME
+      name: "{{ _fqdn }}"
+      content: "{{ _tunnel_id }}.cfargotunnel.com"
+      proxied: true
+    status_code: [200, 400]
+    return_content: true
+  register: _dns_create
+  no_log: true # the request carries the token in a header
+  changed_when: _dns_create.status == 200
+
+- name: Read the public record back
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/zones/{{ _endpoint_cf_zone }}/dns_records?name={{ _fqdn }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+    return_content: true
+  register: _dns_after
+  no_log: true # the request carries the token in a header
+  changed_when: false
+
+- name: HARD GATE — the public record must exist AND be proxied
+  # `proxied: false` would publish the name straight past Cloudflare, so Access would never see the
+  # request. That is the one way this role could expose a service it was asked to protect.
+  ansible.builtin.assert:
+    that:
+      - (_dns_after.json.result | default([])) | length > 0
+      - (_dns_after.json.result | first).proxied | bool
+    fail_msg: >-
+      {{ _fqdn }} is missing from Cloudflare DNS, or exists with proxied=false. An unproxied record
+      bypasses Cloudflare entirely, so Access would never be consulted and the service would be
+      exposed. Fix before considering this published.
+    success_msg: "{{ _fqdn }} published, proxied through Cloudflare."
+    quiet: true
+
+- name: Read the Access applications
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/accounts/{{ _endpoint_cf_account }}/access/apps"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+    return_content: true
+  register: _access_apps
+  no_log: true # the request carries the token in a header
+  changed_when: false
+
+- name: Read every Access app's policies
+  # The app list alone is not enough: an app's protection is decided by its POLICIES, and an app
+  # can also cover several hostnames.
+  ansible.builtin.uri:
+    url: "{{ _cf_api }}/accounts/{{ _endpoint_cf_account }}/access/apps/{{ item.id }}/policies"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _cf_token }}"
+    return_content: true
+  register: _access_pol
+  no_log: true # the request carries the token in a header
+  changed_when: false
+  # Not a silent pass: a failed read is recorded per app and _access_gate.yml refuses to decide a
+  # hostname whose matching app's policies were not read. Failing here instead would also fail on
+  # an unreadable app that has nothing to do with this hostname.
+  failed_when: false
+  loop: "{{ _access_apps.json.result | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default('?') }}"
+
+- name: Decide whether Access authenticates the hostname (fails closed)
+  # Extracted so molecule exercises the real decision — see tasks/_access_gate.yml.
+  ansible.builtin.include_tasks: _access_gate.yml

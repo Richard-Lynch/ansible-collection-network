@@ -1,0 +1,35 @@
+---
+# One guard probe: run the role's _guards.yml with the probe's values in force and require that it
+# FAILS. set_fact (not task vars) so the probe values outrank the converge's own set_fact.
+- name: "Probe — {{ _probe.label }}"
+  block:
+    - name: Save the converge's values
+      ansible.builtin.set_fact:
+        _saved: {frp_token: "{{ frp_token }}", frp_dashboard_enabled: "{{ frp_dashboard_enabled }}"}
+
+    - name: Put the probe's values in force
+      ansible.builtin.set_fact:
+        frp_token: "{{ _probe.vars.frp_token }}"
+        frp_dashboard_enabled: "{{ _probe.vars.frp_dashboard_enabled | default(false) }}"
+        frp_dashboard_pwd: "{{ _probe.vars.frp_dashboard_pwd | default(omit) }}"
+
+    - name: Run the role's guards
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_guards.yml"
+
+    - name: Reaching here means the guards ACCEPTED a value they must refuse
+      ansible.builtin.set_fact:
+        _accepted: true
+  rescue:
+    - name: The guards refused it — expected
+      ansible.builtin.debug:
+        msg: "refused as expected: {{ _probe.label }}"
+  always:
+    - name: Restore the converge's values
+      ansible.builtin.set_fact:
+        frp_token: "{{ _saved.frp_token }}"
+        frp_dashboard_enabled: "{{ _saved.frp_dashboard_enabled | bool }}"
+
+- name: "HARD GATE — the guards refused: {{ _probe.label }}"
+  ansible.builtin.assert:
+    that: ["not (_accepted | default(false))"]
+    fail_msg: "service_frp_relay guards accepted: {{ _probe.label }}"

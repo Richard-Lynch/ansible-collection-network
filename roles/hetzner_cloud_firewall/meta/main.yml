@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Reconcile an existing Hetzner Cloud firewall to a declared, complete rule set through the
+    Hetzner Cloud API, refusing a rule set that would remove SSH, reporting the diff before applying
+    and reading the rules back after.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [hetzner, firewall, cloud, networking, security]
+dependencies: []

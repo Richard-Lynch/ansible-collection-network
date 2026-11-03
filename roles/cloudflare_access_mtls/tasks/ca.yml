@@ -1,0 +1,389 @@
+---
+# Create-or-ADOPT the client CA. The word "adopt" is doing the work here.
+#
+# ============================================================================================
+# WHY THIS IS THE MOST DANGEROUS ENTRYPOINT, AND WHAT MAKES IT SAFE TO RE-RUN.
+#
+# A CA is not a converging resource. Generating a new key pair under the same NAME does not
+# "update" the CA — it produces a DIFFERENT CA, and every client certificate already issued from
+# the old one stops validating. The failure is silent until a device tries to connect, and the
+# only recovery is reissuing every certificate and redistributing them to every device.
+#
+# So this entrypoint is built around a single rule: **a CA that already exists is never
+# regenerated.** There are three places the CA can exist, and they must agree:
+#
+#   1. Cloudflare   — registered under cloudflare_access_mtls_ca_name (read in setup_vars.yml)
+#   2. 1Password    — the PRIVATE KEY, the only copy that matters
+#   3. the workdir  — a local scratch copy, which is disposable by definition
+#
+# The dangerous state is DISAGREEMENT: a CA registered in Cloudflare whose private key is NOT in
+# 1Password cannot sign new client certificates ever again, and a key in 1Password with no CA in
+# Cloudflare cannot authorise anything. Both are reported as hard failures rather than quietly
+# "fixed", because the fix in each direction is a human decision about which one is real.
+#
+# `changed_when` is honest throughout: adopting an existing CA reports ok, not changed. A
+# dishonest changed on this entrypoint would train everyone to ignore the one count that says
+# "the trust anchor was just replaced".
+# ============================================================================================
+
+- name: Validate the CA subject was supplied by the caller
+  # Installation-specific, deliberately with no role default: an organisation identity baked into
+  # a role makes it silently wrong for every other caller.
+  ansible.builtin.assert:
+    that:
+      - cloudflare_access_mtls_ca_subject | default('') | length > 0
+      - cloudflare_access_mtls_ca_subject is match('^/')
+    fail_msg: >-
+      cloudflare_access_mtls_ca_subject must be supplied by the calling play as an OpenSSL subject
+      beginning with '/', e.g.
+      /C=GB/O=Example Org/CN=Example Org Client CA.
+      It is installation-specific and has no role default.
+    quiet: true
+
+# ---------------------------------------------------------------------------------------------
+# Is the CA private key already in 1Password? This is the authoritative question — the Cloudflare
+# side only holds the public certificate.
+# ---------------------------------------------------------------------------------------------
+- name: Look for an existing CA private key in 1Password
+  # ==========================================================================================
+  # READ THROUGH `op`, NOT THROUGH THE CACHED LOOKUP, and this is a correctness requirement
+  # rather than a preference.
+  #
+  # `richard_lynch.common.onepassword_cached` caches a MISS as an empty string in its cache file.
+  # That is right for a secret that exists (fetch once, then free and silent), and WRONG for an
+  # existence TEST: the first run asks before the item exists, caches '', and every later run
+  # reads that stale '' instead of re-asking. The negative answer becomes permanent.
+  #
+  # Through the cache, a CA key that IS in 1Password reads as "1Password does NOT have the private
+  # key", and the role chooses GENERATE over RE-UPLOAD — i.e. it creates a SECOND CA and orphans
+  # the stored key, the exact failure the adopt-never-regenerate design exists to prevent. The
+  # cache would make the guard unable to see the thing it guards.
+  #
+  # `op item get --vault ... --fields` is the authoritative read, and is the same shape
+  # secrets_manager uses. Deliberately NOT `op read op://...`: this title contains SLASHES, which
+  # `op read` treats as op:// path separators — it would silently return an empty string and
+  # reproduce the very bug this task exists to fix.
+  # rc != 0 means absent, which is a normal answer here, so failed_when is false and the rc is
+  # interpreted below. One `op` call, and under the service account it raises no prompt.
+  # ==========================================================================================
+  ansible.builtin.command:
+    cmd: >-
+      op item get "{{ cloudflare_access_mtls_ca_1p_title }}"
+      --vault "{{ cloudflare_access_mtls_vault }}"
+      --fields "label=password" --reveal
+  delegate_to: localhost
+  become: false
+  register: _mtls_ca_key_read
+  changed_when: false
+  # A read: it runs under --check too, so a check-mode run reports from real state.
+  check_mode: false
+  failed_when: false
+  no_log: true
+
+- name: Capture whatever the read returned
+  # rc is checked as well as emptiness: a non-zero rc means "no such item", while rc 0 with empty
+  # output would mean the item exists but the field is blank — a different, louder problem than
+  # absence, and one the PEM-header test below will refuse to treat as a key.
+  #
+  # THE SURROUNDING DOUBLE QUOTES MUST COME OFF. `op item get --fields` wraps a MULTI-LINE value
+  # in literal `"` characters, so the stdout for a PEM is the whole armored key (BEGIN line,
+  # body, END line) with a `"` before the first line and after the last. openssl then refuses it with
+  # "No supported data to decode. Input structure: EncryptedPrivateKeyInfo" — it reads the leading
+  # quote and guesses the file is encrypted, which is a thoroughly misleading error for a key that
+  # is merely quoted. Writing that verbatim to disk makes the re-upload path produce an unparseable
+  # CA key; after stripping, the recovered key's public fingerprint matches the original CA's.
+  ansible.builtin.set_fact:
+    _mtls_ca_key_stored: >-
+      {{ (_mtls_ca_key_read.stdout | default('', true) | trim | regex_replace('\A"', '')
+          | regex_replace('"\Z', ''))
+         if (_mtls_ca_key_read.rc | default(1)) == 0 else '' }}
+  no_log: true
+
+- name: Record whether the stored key looks like a private key
+  # Checks the PEM header rather than mere non-emptiness: a truncated or wrong-field read returns
+  # a non-empty string that is not a key, and treating that as "the CA exists" would be worse
+  # than treating it as absent — the role would skip generation and then fail to sign.
+  ansible.builtin.set_fact:
+    _mtls_ca_key_in_1p: >-
+      {{ (_mtls_ca_key_stored | default('')) is search('-----BEGIN (RSA )?PRIVATE KEY-----') }}
+
+- name: HARD GATE — Cloudflare and 1Password must not disagree about the CA
+  # The two directions, and why neither is auto-repaired:
+  #
+  #  * CA in Cloudflare, key NOT in 1Password -> the CA can never sign another client cert. The
+  #    only honest options are to recover the key from wherever it is, or to deliberately retire
+  #    the CA and reissue everything. Silently generating a new key here would register a SECOND
+  #    CA and leave the first authorising certs nobody can reproduce.
+  #  * Key in 1Password, CA NOT in Cloudflare -> benign and recoverable: re-upload. That case is
+  #    allowed through and handled below, so it is NOT part of this gate.
+  ansible.builtin.assert:
+    that:
+      - not (_mtls_ca_exists | bool and not (_mtls_ca_key_in_1p | bool))
+    fail_msg: >-
+      SPLIT STATE — a CA named '{{ cloudflare_access_mtls_ca_name }}' IS registered in Cloudflare
+      (id {{ _mtls_ca_id }}) but its private key is NOT in 1Password item
+      '{{ cloudflare_access_mtls_ca_1p_title }}'. That CA can therefore never sign another client
+      certificate, and this role will NOT generate a replacement key, because doing so would
+      register a second CA while the first still authorises certificates nobody can reissue.
+      Decide deliberately: recover the key, or retire this CA (delete it in the Zero Trust
+      dashboard, delete the 1Password item, re-run) and reissue every client certificate.
+    quiet: true
+
+# ---------------------------------------------------------------------------------------------
+# PREVIEW
+# ---------------------------------------------------------------------------------------------
+- name: "PREVIEW — CA plan"
+  ansible.builtin.debug:
+    msg: >-
+      {{ '(DRY RUN — nothing written)' if not (cloudflare_access_mtls_apply | bool)
+         else '(APPLY MODE)' }}
+      CA '{{ cloudflare_access_mtls_ca_name }}':
+      Cloudflare {{ 'HAS it (id ' + _mtls_ca_id + ')' if _mtls_ca_exists | bool else 'does NOT have it' }};
+      1Password {{ 'HAS the private key' if _mtls_ca_key_in_1p | bool else 'does NOT have the private key' }}.
+      {{ 'ADOPT — nothing to do; the CA exists and its key is stored. It will NOT be regenerated.'
+         if (_mtls_ca_exists | bool and _mtls_ca_key_in_1p | bool)
+         else ('RE-UPLOAD — the key exists in 1Password but no CA is registered; the stored key
+                will be used to re-derive and upload the certificate. No new key is generated.'
+               if _mtls_ca_key_in_1p | bool
+               else 'GENERATE — a new ' + (cloudflare_access_mtls_ca_key_bits | string) + '-bit CA
+                     valid ' + (cloudflare_access_mtls_ca_days | string) + ' days, subject
+                     ' + cloudflare_access_mtls_ca_subject + '. Its key goes to 1Password
+                     (' + cloudflare_access_mtls_ca_1p_title + ') and the certificate is uploaded
+                     to Cloudflare.') }}
+
+# DRY RUN ENDS HERE — by gating, not by stopping. Every task below carries
+# `cloudflare_access_mtls_apply | bool`, so a dry run skips them and returns to main.yml, which
+# still prints the report it promises, and the CALLER's play carries on. (`meta: end_play` used to
+# stand here: it ends the caller's ENTIRE play, not this role, so the report never printed and
+# anything the caller ran after this role silently did not happen.)
+
+# =============================================================================================
+# APPLY
+# =============================================================================================
+
+# --- Case 1: nothing exists anywhere -> generate -------------------------------------------
+- name: "APPLY — generate the CA private key"
+  # `creates:` makes this idempotent against the workdir too, so an interrupted run that already
+  # wrote the key does not overwrite it on the next pass.
+  #
+  # Deliberately NOT no_log: openssl writes the key to the FILE named by -out and prints nothing
+  # sensitive, so the argv and the result carry a path, never key material. Keeping it loggable
+  # means a generation failure (bad bits value, unwritable workdir) is diagnosable. The tasks that
+  # subsequently READ this file's contents into a variable are the ones that carry no_log.
+  ansible.builtin.command:
+    cmd: >-
+      openssl genrsa -out {{ _mtls_ca_key | quote }}
+      {{ cloudflare_access_mtls_ca_key_bits }}
+    creates: "{{ _mtls_ca_key }}"
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_key_in_1p | bool)
+
+- name: "APPLY — tighten the CA key's mode"
+  ansible.builtin.file:
+    path: "{{ _mtls_ca_key }}"
+    mode: "0600"
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_key_in_1p | bool)
+
+- name: "APPLY — store the CA private key in 1Password BEFORE uploading anything"
+  # Order is deliberate: the key is persisted to its authoritative home FIRST. If the upload then
+  # fails, the recoverable state is "key stored, CA not registered" (handled by the re-upload path
+  # above). The reverse order risks "CA registered, key only in a scratch directory" — the split
+  # state the gate above refuses to repair.
+  #
+  # no_log on the INCLUDE, because `secrets_manager_value` here is the CA PRIVATE KEY itself,
+  # inlined from the file via a lookup — an argument with no no_log of its own, so keeping it out
+  # of task output would otherwise depend on Ansible version, verbosity and callback (the same is
+  # true of a `uri` header; those tasks are no_log too). A token is rotatable; this key is the trust
+  # anchor for every hostname the CA is associated with, so no_log on anything that generates,
+  # reads or stores it is not a judgement call. (secrets_manager is itself no_log internally; this is belt-and-braces at the boundary.)
+  ansible.builtin.include_role:
+    name: richard_lynch.common.secrets_manager
+    apply:
+      no_log: true
+  vars:
+    secrets_manager_action: ensure
+    secrets_manager_title: "{{ cloudflare_access_mtls_ca_1p_title }}"
+    secrets_manager_vault: "{{ cloudflare_access_mtls_vault }}"
+    secrets_manager_value: "{{ lookup('ansible.builtin.file', _mtls_ca_key) }}"
+    secrets_manager_notes: >-
+      Cloudflare Access mTLS CLIENT CA private key ({{ cloudflare_access_mtls_ca_name }}).
+      THE TRUST ANCHOR for every client certificate issued to a device. Losing it means no new
+      client certificate can ever be issued from this CA; leaking it means anyone can mint a
+      certificate that satisfies the Access common_name policy. Generated by
+      the cloudflare_access_mtls role (action=ca). Valid
+      {{ cloudflare_access_mtls_ca_days }} days from creation. The matching PUBLIC certificate is
+      registered in Cloudflare Zero Trust -> Access -> Service Auth -> Mutual TLS. Rotation
+      invalidates EVERY issued client certificate — see the role README.
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_key_in_1p | bool)
+
+# --- Case 2: key in 1Password, CA absent in Cloudflare -> materialise the key locally -------
+- name: "APPLY — write the stored CA key to the workdir for signing/re-upload"
+  # The 1Password copy is authoritative, so this materialises it rather than generating anything.
+  # This is also the path that makes the role work on a DIFFERENT CONTROLLER: a fresh checkout has
+  # an empty workdir, and the CA is recovered from 1Password rather than being regenerated.
+  ansible.builtin.copy:
+    content: "{{ _mtls_ca_key_stored }}\n"
+    dest: "{{ _mtls_ca_key }}"
+    mode: "0600"
+  no_log: true
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - _mtls_ca_key_in_1p | bool
+
+- name: "VERIFY — the recovered CA key actually PARSES as a private key"
+  # The PEM-header test earlier proves the string LOOKS like a key; this proves openssl can USE
+  # it. The two came apart for real: `op item get --fields` quote-wraps a multi-line value, so the
+  # header matched while openssl rejected the file as "EncryptedPrivateKeyInfo". Without this gate
+  # the run continued and every subsequent signing operation failed against a key that was merely
+  # quoted — a failure that surfaces far from its cause.
+  ansible.builtin.command:
+    cmd: "openssl pkey -in {{ _mtls_ca_key | quote }} -noout"
+  register: _mtls_ca_key_parse
+  changed_when: false
+  failed_when: false
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - _mtls_ca_key_in_1p | bool
+
+- name: HARD GATE — the recovered CA key must be usable
+  ansible.builtin.assert:
+    that:
+      - (_mtls_ca_key_parse.rc | default(1)) == 0
+    fail_msg: >-
+      The CA private key recovered from 1Password
+      ('{{ cloudflare_access_mtls_ca_1p_title }}') does not parse as a private key:
+      {{ _mtls_ca_key_parse.stderr | default('') | truncate(200) }}.
+      A likely cause is stray wrapping characters from the 1Password read — `op item get --fields`
+      wraps a MULTI-LINE value in literal double quotes, and openssl then reports
+      "EncryptedPrivateKeyInfo", which reads as "this key has a passphrase" rather than "this key
+      has quotes around it". Nothing has been uploaded and no client has been signed.
+    success_msg: "Recovered CA key parses correctly — safe to sign and upload."
+    quiet: true
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - _mtls_ca_key_in_1p | bool
+
+# --- The self-signed CA certificate, derived from whichever key is now on disk --------------
+- name: "APPLY — derive the CA certificate from the key"
+  # Regenerating the CERTIFICATE from an unchanged key is safe: the public cert is a statement
+  # about that key, and re-deriving it does not change the trust anchor. `creates:` still avoids
+  # pointless churn (and a changed notBefore date) on a converged run.
+  ansible.builtin.command:
+    cmd: >-
+      openssl req -x509 -new -nodes
+      -key {{ _mtls_ca_key | quote }}
+      -sha256 -days {{ cloudflare_access_mtls_ca_days }}
+      -out {{ _mtls_ca_crt | quote }}
+      -subj {{ cloudflare_access_mtls_ca_subject | quote }}
+    creates: "{{ _mtls_ca_crt }}"
+  when: cloudflare_access_mtls_apply | bool
+
+- name: "APPLY — read the CA certificate for upload"
+  ansible.builtin.slurp:
+    src: "{{ _mtls_ca_crt }}"
+  register: _mtls_ca_crt_b64
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_exists | bool)
+
+- name: "APPLY — upload the CA to Cloudflare Access"
+  # associated_hostnames is sent here too, so a brand-new CA is immediately usable. The
+  # `associate` entrypoint reconciles it thereafter.
+  ansible.builtin.uri:
+    url: "{{ _mtls_api }}/access/certificates"
+    headers: "{{ _mtls_headers }}"
+    method: POST
+    body_format: json
+    body:
+      name: "{{ cloudflare_access_mtls_ca_name }}"
+      certificate: "{{ _mtls_ca_crt_b64.content | b64decode }}"
+      associated_hostnames: "{{ cloudflare_access_mtls_hostnames }}"
+    status_code: [200, 201, 400, 401, 403]
+    return_content: true
+  register: _mtls_ca_upload
+  no_log: true # the Authorization header; the gate below reports the status and body
+  changed_when: (_mtls_ca_upload.status | default(0)) in [200, 201]
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_exists | bool)
+
+- name: HARD GATE — the CA upload must have succeeded
+  ansible.builtin.assert:
+    that:
+      - (_mtls_ca_upload.status | default(0)) in [200, 201]
+    fail_msg: >-
+      Failed to upload the CA '{{ cloudflare_access_mtls_ca_name }}' — HTTP
+      {{ _mtls_ca_upload.status | default('unknown') }}:
+      {{ _mtls_ca_upload.content | default('no body') | truncate(400) }}.
+      {{ '*** ERROR 12130 — THIS IS A PLAN ENTITLEMENT WALL, NOT A BUG AND NOT A SCOPE PROBLEM.
+          "maximum number of certificates has been reached" with zero CAs registered means the
+          account s Access CA quota is ZERO. Access mTLS requires an Enterprise or pay-as-you-go
+          Zero Trust plan (the free plan has none). Note 12130 is the ACCESS certificate
+          quota, NOT the BYOCA five-CA quota (that is error 1489), so it is the Access
+          entitlement. Nothing in this role or its token scope will change this: upgrade the Zero
+          Trust plan, or use an Access SERVICE TOKEN, which works on the free plan. ***'
+         if '12130' in (_mtls_ca_upload.content | default(''))
+         else 'A 403 means the token lacks "Access: Mutual TLS Certificates Write"
+               (29d3afbfd4054af9accdd1118815ed05); a 400 means the token WAS authorised and the
+               certificate body was rejected.' }}
+      The private key IS already in 1Password
+      ('{{ cloudflare_access_mtls_ca_1p_title }}'), so this is safe to re-run once fixed — the
+      role will take the re-upload path and will not generate a second key.
+    quiet: true
+  when:
+    - cloudflare_access_mtls_apply | bool
+    - not (_mtls_ca_exists | bool)
+
+# ---------------------------------------------------------------------------------------------
+# VERIFY BY READ-BACK
+# ---------------------------------------------------------------------------------------------
+- name: "VERIFY — re-read the CA list from Cloudflare"
+  ansible.builtin.uri:
+    url: "{{ _mtls_api }}/access/certificates"
+    headers: "{{ _mtls_headers }}"
+    method: GET
+    status_code: [200]
+    return_content: true
+  register: _mtls_ca_after
+  no_log: true # the Authorization header; the gate below reports the status and body
+  changed_when: false
+  when: cloudflare_access_mtls_apply | bool
+
+- name: "VERIFY — locate the CA and its fingerprint"
+  ansible.builtin.set_fact:
+    _mtls_ca_after_obj: >-
+      {{ ((_mtls_ca_after.content | from_json).result | default([])
+          | selectattr('name', 'equalto', cloudflare_access_mtls_ca_name)
+          | list | first) | default(None) }}
+  when: cloudflare_access_mtls_apply | bool
+
+- name: HARD GATE — the CA is registered, and exactly once
+  # The "exactly once" half matters: Cloudflare permits two CAs with the same name, which is the
+  # duplicate this entrypoint's whole design exists to prevent. Asserting only "it is present"
+  # would go green on precisely the state that breaks reissuing.
+  ansible.builtin.assert:
+    that:
+      - _mtls_ca_after_obj is not none
+      - >-
+        ((_mtls_ca_after.content | from_json).result | default([])
+         | selectattr('name', 'equalto', cloudflare_access_mtls_ca_name)
+         | list | length) == 1
+    fail_msg: >-
+      After this run, CA '{{ cloudflare_access_mtls_ca_name }}' is not registered exactly once.
+      Found
+      {{ (_mtls_ca_after.content | from_json).result | default([])
+         | selectattr('name', 'equalto', cloudflare_access_mtls_ca_name) | list | length }}
+      CA(s) of that name. Cloudflare allows duplicate names, and two CAs with one name is
+      unrecoverable by automation — only one of them signed any given client certificate, and
+      nothing in the API says which. Resolve in the Zero Trust dashboard before issuing anything.
+    success_msg: >-
+      CA '{{ cloudflare_access_mtls_ca_name }}' registered exactly once
+      (id {{ (_mtls_ca_after_obj | default({}, true)).get('id', 'unknown') }}), private key stored in
+      1Password as '{{ cloudflare_access_mtls_ca_1p_title }}'.
+    quiet: true
+  when: cloudflare_access_mtls_apply | bool

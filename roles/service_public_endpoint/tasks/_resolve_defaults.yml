@@ -1,0 +1,53 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/service_public_endpoint/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_public_endpoint
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    endpoint_record_type: "{{ endpoint_record_type | default(endpoint_record_type__default) if endpoint_record_type__default is defined else endpoint_record_type | default(omit) }}"
+    endpoint_public: "{{ endpoint_public | default(endpoint_public__default) if endpoint_public__default is defined else endpoint_public | default(omit) }}"
+    endpoint_tunnel: "{{ endpoint_tunnel | default(endpoint_tunnel__default) if endpoint_tunnel__default is defined else endpoint_tunnel | default(omit) }}"
+    endpoint_tunnel_ids: "{{ endpoint_tunnel_ids | default(endpoint_tunnel_ids__default) if endpoint_tunnel_ids__default is defined else endpoint_tunnel_ids | default(omit) }}"
+    endpoint_apply: "{{ endpoint_apply | default(endpoint_apply__default) if endpoint_apply__default is defined else endpoint_apply | default(omit) }}"
+    endpoint_machine_zone_labels: "{{ endpoint_machine_zone_labels | default(endpoint_machine_zone_labels__default) if endpoint_machine_zone_labels__default is defined else endpoint_machine_zone_labels | default(omit) }}"
+    endpoint_origin_request: "{{ endpoint_origin_request | default(endpoint_origin_request__default) if endpoint_origin_request__default is defined else endpoint_origin_request | default(omit) }}"
+    endpoint_do: "{{ endpoint_do | default(endpoint_do__default) if endpoint_do__default is defined else endpoint_do | default(omit) }}"
+  when: not (_service_public_endpoint__argspec_resolved | default(false))
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    endpoint_record_type: "{{ endpoint_record_type__default if endpoint_record_type__default is defined else endpoint_record_type | default(omit) }}"
+    endpoint_public: "{{ endpoint_public__default if endpoint_public__default is defined else endpoint_public | default(omit) }}"
+    endpoint_tunnel: "{{ endpoint_tunnel__default if endpoint_tunnel__default is defined else endpoint_tunnel | default(omit) }}"
+    endpoint_tunnel_ids: "{{ endpoint_tunnel_ids__default if endpoint_tunnel_ids__default is defined else endpoint_tunnel_ids | default(omit) }}"
+    endpoint_apply: "{{ endpoint_apply__default if endpoint_apply__default is defined else endpoint_apply | default(omit) }}"
+    endpoint_machine_zone_labels: "{{ endpoint_machine_zone_labels__default if endpoint_machine_zone_labels__default is defined else endpoint_machine_zone_labels | default(omit) }}"
+    endpoint_origin_request: "{{ endpoint_origin_request__default if endpoint_origin_request__default is defined else endpoint_origin_request | default(omit) }}"
+    endpoint_do: "{{ endpoint_do__default if endpoint_do__default is defined else endpoint_do | default(omit) }}"
+  when: _service_public_endpoint__argspec_resolved | default(false)
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _service_public_endpoint__argspec_resolved: true

@@ -1,0 +1,41 @@
+---
+# Reconcile the CA's `associated_hostnames` against the declared list.
+#
+# WHY THIS IS ITS OWN ENTRYPOINT, AND WHY IT MATTERS MORE THAN IT LOOKS.
+#   Cloudflare only accepts a client certificate for a hostname the CA is ASSOCIATED WITH. So a
+#   perfectly valid certificate, matching a correct Access policy, is still rejected if its
+#   hostname is missing here — and the symptom is an ordinary SSO redirect, which reads as "mTLS
+#   is not working" with nothing pointing at the association list.
+#
+#   This is therefore the second half of onboarding a hostname (the first being the Access app's
+#   policy). Adding a service means its hostname appears in
+#   cloudflare_access_mtls_hostnames and this entrypoint runs — no code change.
+#
+# READ-FULL / WRITE-FULL: the PUT replaces associated_hostnames wholesale, so the desired list is
+# sent in full. Unlike the Access-app case there is no "unowned entry" to preserve — this role
+# owns the CA it created, and the declared list is the complete intent. That is stated here rather
+# than assumed, because the same read-modify-write shape on other Cloudflare objects does need it.
+
+- name: HARD GATE — the CA must exist to be associated with anything
+  ansible.builtin.assert:
+    that:
+      - _mtls_ca_exists | bool
+    fail_msg: >-
+      No CA named '{{ cloudflare_access_mtls_ca_name }}' is registered, so there is nothing to
+      associate hostnames with. Run with cloudflare_access_mtls_action=ca first.
+    quiet: true
+  when: cloudflare_access_mtls_apply | bool
+
+- name: "PREVIEW — no CA yet, so nothing further can be planned"
+  ansible.builtin.debug:
+    msg: >-
+      (DRY RUN) No CA named '{{ cloudflare_access_mtls_ca_name }}' is registered yet. Once
+      cloudflare_access_mtls_action=ca is applied, this step will
+      associate the declared hostnames with it.
+  when:
+    - not (cloudflare_access_mtls_apply | bool)
+    - not (_mtls_ca_exists | bool)
+
+- name: Reconcile against the existing CA
+  ansible.builtin.include_tasks: _associate_existing.yml
+  when: _mtls_ca_exists | bool

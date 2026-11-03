@@ -1,0 +1,27 @@
+---
+# One Access case: run the role's OWN _access_gate.yml for _case.fqdn against the fixture apps and
+# policies, and record whether it PASSED and which app won. verify.yml asserts the record.
+- name: "Access case — {{ _case.fqdn }}"
+  block:
+    - name: Reset the previous case's winner
+      ansible.builtin.set_fact:
+        _access_winner: []
+
+    - name: Run the role's Access gate
+      ansible.builtin.include_role:
+        name: service_public_endpoint
+        tasks_from: _access_gate
+      vars:
+        _fqdn: "{{ _case.fqdn }}"
+        _access_apps: "{{ _case.apps | default(_apps_ok) }}"
+        _access_pol: "{{ _pols }}"
+
+    - name: Record — the gate PASSED
+      ansible.builtin.set_fact:
+        r_access: "{{ r_access | default({}) | combine({(_case.key | default(_case.fqdn)): {'passed': true,
+                      'winner': (_access_winner | map(attribute='name') | first | default('NONE'))}}) }}"
+  rescue:
+    - name: Record — the gate REFUSED
+      ansible.builtin.set_fact:
+        r_access: "{{ r_access | default({}) | combine({(_case.key | default(_case.fqdn)): {'passed': false,
+                      'winner': (_access_winner | map(attribute='name') | first | default('NONE'))}}) }}"

@@ -1,0 +1,31 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_winner_diff
+  short_description: List the hostnames whose deciding Access application differs between two app lists
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - An empty result means adding or changing applications re-decides no existing hostname.
+  options:
+    _input:
+      description: The Access applications before the change.
+      type: list
+      required: true
+    apps_after:
+      description: The Access applications after the change.
+      type: list
+      required: true
+    hosts:
+      description: The hostnames to compare.
+      type: list
+      required: true
+EXAMPLES: |
+  - name: Adding the wildcard apps re-decides nothing
+    ansible.builtin.assert:
+      that:
+        - (apps_before | richard_lynch.network.hosting_edge_winner_diff(apps_before + new_apps, existing_hosts)) == []
+RETURN:
+  _value:
+    description: The hostnames whose winner changes, sorted.
+    type: list

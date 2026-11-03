@@ -1,0 +1,29 @@
+# Offline scenario. Exercises the role's DECISION logic — the ingress merge, the CNAME/A collision
+# guard, and the Access-winner resolution — against captured fixtures, with no controller, no DNS
+# server and no network access.
+#
+# The ingress fixture is a realistic tunnel: nine hostnames plus a catch-all, all on a container-
+# local service value that differs from the role's own. That is deliberate — it is the list a
+# naive PUT would delete, so the test asserts against a real blast radius, not a toy list.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # The scenario CALLS the role rather than re-implementing it, so the roles directory must be on
+  # the search path.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

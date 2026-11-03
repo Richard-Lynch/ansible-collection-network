@@ -1,0 +1,175 @@
+---
+# cloudflare_hosting_edge (acm) — order an Advanced Certificate Manager pack covering the tier
+# wildcards, and read it back ACTIVE.
+#
+# WHY IT IS NEEDED. The Universal certificate covers the zone and ONE label below it
+# (*.example.com). `hello.dev.example.com` is two labels down, so without an advanced pack the edge
+# serves a certificate that does not name it. Cloudflare will happily proxy the request and the
+# browser (or the service-token client) fails the TLS handshake — which looks like the tunnel or
+# Access being broken, and is neither.
+#
+# NOT ASSUMED: an order returning 200 means "accepted", not "serving". The pack passes through
+# initializing -> pending_validation -> active and only the last one serves traffic, so this entry-
+# point waits and then ASSERTS each wildcard is named by an ACTIVE pack.
+
+- name: Load this entrypoint's generated defaults
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/defaults/acm.yml"
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Apply the generated argspec guards
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Derive the hosts the pack must name
+  ansible.builtin.set_fact:
+    _cfhe_api: "https://api.cloudflare.com/client/v4"
+    _cfhe_acm_hosts: "{{ cloudflare_hosting_edge_tiers.values() | map(attribute='suffix') | map('regex_replace', '^', '*.') | sort | list }}"
+
+- name: HARD GATE — a token source is configured
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cloudflare_hosting_edge_api_token | default('')) | length > 0
+        or ((cloudflare_hosting_edge_token_item | default('')) | length > 0
+            and (cloudflare_hosting_edge_op_vault | default('')) | length > 0)
+    fail_msg: >-
+      Set cloudflare_hosting_edge_api_token, or cloudflare_hosting_edge_token_item plus
+      cloudflare_hosting_edge_op_vault (1Password).
+    quiet: true
+  no_log: true
+
+- name: Resolve the API token
+  # The caller's token when passed; otherwise the 1Password item (the lookup is only evaluated on
+  # that branch).
+  ansible.builtin.set_fact:
+    _cfhe_token: >-
+      {{ cloudflare_hosting_edge_api_token
+         if (cloudflare_hosting_edge_api_token | default('')) | length > 0
+         else lookup('richard_lynch.common.onepassword_cached', cloudflare_hosting_edge_token_item,
+                     field=cloudflare_hosting_edge_token_field, vault=cloudflare_hosting_edge_op_vault) }}
+  no_log: true
+
+- name: HARD GATE — the token read back non-empty
+  ansible.builtin.assert:
+    that:
+      - _cfhe_token | default('') | length > 0
+    fail_msg: "The Cloudflare token (cloudflare_hosting_edge_api_token, or 1Password item {{ cloudflare_hosting_edge_token_item | default('(unset)') }}, field {{ cloudflare_hosting_edge_token_field }}) is EMPTY. A Password-category item holds its value in `password`, an API Credential item in `credential`."
+    quiet: true
+  no_log: true
+
+- name: Read the certificate packs
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/ssl/certificate_packs?status=all"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+    status_code: [200, 403]
+  register: _cfhe_packs_raw
+  changed_when: false
+  no_log: true
+  check_mode: false # a read: --check must report from real state, not from a skipped call
+
+- name: HARD GATE — the packs were readable (a 403 is a token-scope problem, not "no packs")
+  ansible.builtin.assert:
+    that:
+      - _cfhe_packs_raw.status == 200
+      - (_cfhe_packs_raw.content | from_json).success | bool
+    fail_msg: >-
+      Could not read certificate packs (HTTP {{ _cfhe_packs_raw.status }}). The token lacks the
+      SSL and Certificates permission (Read to list, Edit to order) — check the token's permission
+      groups in the Cloudflare dashboard (My Profile -> API Tokens). Not reading an unreadable
+      listing as "no pack exists".
+    quiet: true
+
+- name: Work out what is missing and what is already in flight
+  ansible.builtin.set_fact:
+    _cfhe_packs: "{{ (_cfhe_packs_raw.content | from_json).result | default([], true) }}"
+    _cfhe_inflight: >-
+      {{ ((_cfhe_packs_raw.content | from_json).result | default([], true))
+         | selectattr('type', 'equalto', 'advanced')
+         | rejectattr('status', 'in', ['active', 'deleted', 'expired', 'validity_days_changed', 'timed_out_validation', 'timed_out_issuance', 'timed_out_deployment'])
+         | selectattr('hosts', 'defined')
+         | list }}
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "{{ 'APPLY' if cloudflare_hosting_edge_apply | bool else 'PREVIEW (cloudflare_hosting_edge_apply=true to act)' }}"
+      - "hosts the pack must name: {{ _cfhe_acm_hosts }}"
+      - "not covered by an ACTIVE pack today: {{ _cfhe_packs | richard_lynch.network.hosting_edge_cert_missing(_cfhe_acm_hosts) }}"
+      - "advanced packs in flight: {{ _cfhe_inflight | map(attribute='status') | list }} for {{ _cfhe_inflight | map(attribute='hosts') | list }}"
+
+- name: Order the pack
+  # Skipped when an advanced pack naming every host is already in flight: ordering twice creates a
+  # second pack (and a second bill line) for the same hosts.
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/ssl/certificate_packs/order"
+    method: POST
+    headers: { Authorization: "Bearer {{ _cfhe_token }}", Content-Type: application/json }
+    body_format: json
+    body:
+      type: advanced
+      hosts: "{{ _cfhe_acm_hosts }}"
+      validation_method: txt
+      validity_days: "{{ cloudflare_hosting_edge_acm_validity_days | int }}"
+      certificate_authority: "{{ cloudflare_hosting_edge_acm_ca }}"
+      cloudflare_branding: false
+    # Cloudflare answers a new order with 201 Created. The error statuses are ACCEPTED here and
+    # failed by the gate below, so the failure is explained from the response body while the task
+    # itself stays no_log: `uri` declares no no_log for `headers`, so keeping the Authorization
+    # header out of the output would otherwise depend on Ansible version, verbosity and callback.
+    status_code: [200, 201, 400, 401, 403]
+    return_content: true
+  register: _cfhe_order
+  changed_when: (_cfhe_order.status | default(0)) in [200, 201]
+  no_log: true
+  when:
+    - cloudflare_hosting_edge_apply | bool
+    - _cfhe_packs | richard_lynch.network.hosting_edge_cert_missing(_cfhe_acm_hosts) | length > 0
+    - _cfhe_inflight | selectattr('hosts', 'superset', _cfhe_acm_hosts) | list | length == 0
+
+- name: HARD GATE — the order was accepted
+  ansible.builtin.assert:
+    that:
+      - (_cfhe_order.status | default(0)) in [200, 201]
+    fail_msg: >-
+      The certificate pack order was refused — HTTP {{ _cfhe_order.status | default('unknown') }}:
+      {{ (_cfhe_order.content | default('no body'))[:400] }}. A 403 means the token lacks
+      SSL and Certificates Edit.
+    quiet: true
+  when: _cfhe_order is not skipped and _cfhe_order.status is defined
+
+- name: Wait until every host is named by an ACTIVE pack
+  # failed_when false + until: exhausts and CONTINUES, so the assert below is what makes a timeout
+  # a failure (UNTIL-01).
+  ansible.builtin.uri:
+    url: "{{ _cfhe_api }}/zones/{{ cloudflare_hosting_edge_zone_id }}/ssl/certificate_packs?status=all"
+    headers: { Authorization: "Bearer {{ _cfhe_token }}" }
+    return_content: true
+  register: _cfhe_packs_wait
+  until: >-
+    ((_cfhe_packs_wait.content | from_json).result | default([], true))
+    | richard_lynch.network.hosting_edge_cert_missing(_cfhe_acm_hosts) | length == 0
+  retries: "{{ ((cloudflare_hosting_edge_acm_wait_s | int) / 15) | round(0, 'ceil') | int }}"
+  delay: 15
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: cloudflare_hosting_edge_apply | bool
+
+- name: HARD GATE — every wildcard host is named by an active pack (read back, not the order's 200)
+  ansible.builtin.assert:
+    that:
+      - _cfhe_still_missing | length == 0
+    fail_msg: >-
+      After {{ cloudflare_hosting_edge_acm_wait_s }}s these hosts are still not named by an ACTIVE
+      advanced pack: {{ _cfhe_still_missing }}. Pack states:
+      {{ _cfhe_packs_final | selectattr('type', 'equalto', 'advanced') | map(attribute='status') | list }}.
+      pending_validation usually means the DCV TXT record has not been seen yet.
+    success_msg: "{{ _cfhe_acm_hosts }} are all named by an active advanced pack."
+    quiet: false
+  vars:
+    _cfhe_packs_final: "{{ (_cfhe_packs_wait.content | from_json).result | default([], true) }}"
+    _cfhe_still_missing: "{{ _cfhe_packs_final | richard_lynch.network.hosting_edge_cert_missing(_cfhe_acm_hosts) }}"
+  when: cloudflare_hosting_edge_apply | bool

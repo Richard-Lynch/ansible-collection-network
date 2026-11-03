@@ -1,0 +1,73 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_frp_relay/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_frp_relay
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Deploy an frps TCP relay on a public host (dashboard off or loopback-only)
+    version_added: '1.1'
+    author: Collection maintainers
+    options:
+      frp_version:
+        description:
+          - fatedier/frps image tag to deploy.
+        type: str
+        required: false
+        default: v0.65.0
+      frp_deploy_dir:
+        description:
+          - Directory holding the frps compose file and frps.ini on the relay host.
+        type: str
+        required: false
+        default: /opt/frps
+      frp_bind_port:
+        description:
+          - Control port the frpc client dials out to.
+        type: int
+        required: false
+        default: 7000
+      frp_allow_ports:
+        description:
+          - Ports the relay is permitted to publish (raw TCP passthrough).
+        type: str
+        required: false
+        default: 80,443
+      frp_token:
+        description:
+          - Shared control-channel secret. Source from a secret store; must match frpc.ini.
+          - 'No default: a placeholder or a value shorter than 16 characters is rejected'
+          - before anything is rendered.
+        type: str
+        required: true
+        no_log: true
+      frp_dashboard_enabled:
+        description:
+          - Dashboard OFF by default (an admin panel with basic auth only). If true,
+          - the template hard-binds it to 127.0.0.1 (reach it via SSH tunnel only).
+        type: bool
+        required: false
+        default: false
+      frp_dashboard_port:
+        description:
+          - Dashboard port (loopback-only when enabled).
+        type: int
+        required: false
+        default: 7500
+      frp_dashboard_user:
+        description:
+          - Dashboard basic-auth user (only used when enabled).
+        type: str
+        required: false
+        default: admin
+      frp_dashboard_pwd:
+        description:
+          - 'Dashboard basic-auth password; source from a secret store. No default:'
+          - required (at least 12 characters, not a placeholder) when the dashboard is enabled.
+        type: str
+        required: false
+        no_log: true

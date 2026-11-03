@@ -1,0 +1,19 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/hetzner_cloud_firewall/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate hetzner_cloud_firewall
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Generate-don't-apply. When false, reports the diff and changes nothing.
+hetzner_firewall_apply__default: false
+
+# Inbound TCP ports that MUST remain open. Guarded before any write: this
+# role runs against a host reachable by exactly one path, and a rule set
+# that omits SSH locks everyone out with no way back but the console.
+hetzner_firewall_required_ports__default:
+  - 22

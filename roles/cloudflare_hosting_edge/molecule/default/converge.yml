@@ -1,0 +1,143 @@
+---
+# Exercises the wildcard-safety FILTERS against fixtures in the shapes the Cloudflare API returns
+# (Access apps with `domain` + `self_hosted_domains`, a tunnel's ingress list ending in a
+# catch-all). The filters are the security boundary of publishing a wildcard on a shared zone, so
+# every one has fixtures that must FAIL and near-misses that must PASS. The role's API tasks need a
+# live account and are proven by their own read-backs when applied.
+- name: Converge — wildcard safety filters
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _wild: ["*.dev.example.com", "*.apps.example.com"]
+    # A zone-wide wildcard app, two exact apps (one with a path, which decides only that path) and
+    # one app carrying several hostnames.
+    _apps:
+      - { name: zone-wide, domain: "*.example.com", self_hosted_domains: ["*.example.com"] }
+      - { name: api-service-auth, domain: "api.example.com", self_hosted_domains: ["api.example.com"] }
+      - { name: tool-path, domain: "tool.example.com/mcp", self_hosted_domains: ["tool.example.com/mcp"] }
+      - { name: dashboards, domain: "grafana.example.com", self_hosted_domains: ["grafana.example.com", "metrics.example.com"] }
+    _net:
+      ingress:
+        - { hostname: "api.example.com", service: "http://origin.example.com:8080" }
+        - { hostname: "grafana.example.com", service: "https://proxy.example.com:443" }
+        - { hostname: "metrics.example.com", service: "https://proxy.example.com:443" }
+        - { service: "http_status:404" }
+    _dev_rule: { hostname: "*.dev.example.com", service: "http://hosting.example.com:8080" }
+    _prod_rule: { hostname: "*.apps.example.com", service: "http://hosting.example.com:8081" }
+  tasks:
+    # ---------------------------------------------------------------- capture
+    - name: The existing hostnames are NOT captured by the two wildcards
+      ansible.builtin.assert:
+        that:
+          - _wild | richard_lynch.network.hosting_edge_captured(_existing) == []
+        quiet: true
+      vars:
+        _existing: >-
+          {{ (_net.ingress | selectattr('hostname', 'defined') | map(attribute='hostname') | list)
+             + (_apps | map(attribute='self_hosted_domains') | flatten | list)
+             + ['example.com', 'dev.example.com', 'apps.example.com', 'devops.example.com', 'xdev.example.com'] }}
+
+    - name: A name already under a wildcard IS captured (must fail the gate), at any depth
+      ansible.builtin.assert:
+        that:
+          - _wild | richard_lynch.network.hosting_edge_captured(['foo.dev.example.com', 'x.y.apps.example.com', 'api.example.com']) == ['foo.dev.example.com', 'x.y.apps.example.com']
+        quiet: true
+
+    - name: Near-misses are not captured (apex of the wildcard, suffix lookalikes, the zone-wide wildcard itself)
+      ansible.builtin.assert:
+        that:
+          - _wild | richard_lynch.network.hosting_edge_captured(['dev.example.com', 'xdev.example.com', 'dev.example.com.evil.test', '*.example.com', '*.dev.example.com']) == []
+        quiet: true
+
+    # ---------------------------------------------------------------- who wins
+    - name: The existing hostnames keep their winner when the wildcard apps are added
+      ansible.builtin.assert:
+        that:
+          - _apps | richard_lynch.network.hosting_edge_winner_diff(_apps + _new, _hosts) == []
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('hello.dev.example.com') == 'hosting-dev-wildcard'
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('console.apps.example.com') == 'hosting-prod-wildcard'
+          # specificity: the exact app beats the zone-wide wildcard; the wildcard still decides the rest
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('api.example.com') == 'api-service-auth'
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('metrics.example.com') == 'dashboards'
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('other.example.com') == 'zone-wide'
+          # a path app decides only its path, never the root
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('tool.example.com') == 'zone-wide'
+          # the apex of a wildcard is NOT decided by it
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('dev.example.com') == 'zone-wide'
+          # a DEEP name under the dev wildcard is decided by the longer wildcard
+          - (_apps + _new) | richard_lynch.network.hosting_edge_winner('a.b.dev.example.com') == 'hosting-dev-wildcard'
+        quiet: true
+      vars:
+        _new:
+          - { name: hosting-dev-wildcard, domain: "*.dev.example.com" }
+          - { name: hosting-prod-wildcard, domain: "*.apps.example.com" }
+        _hosts: "{{ _net.ingress | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}"
+
+    - name: The diff filter reports a host whose winner an added app would change (the gate's failing input)
+      ansible.builtin.assert:
+        that:
+          - "_apps | richard_lynch.network.hosting_edge_winner_diff(_apps + [{'name': 'oops', 'domain': 'other.example.com'}], ['api.example.com', 'other.example.com']) == ['other.example.com']"
+        quiet: true
+
+    # ---------------------------------------------------------------- ingress merge
+    - name: Merging keeps all existing rules, adds two, catch-all last
+      ansible.builtin.assert:
+        that:
+          - _after | length == (_net.ingress | length) + 2
+          - "_after[-1] == {'service': 'http_status:404'}"
+          - "_net.ingress | reject('equalto', {'service': 'http_status:404'}) | difference(_after) | length == 0"
+          - _after | selectattr('hostname', 'defined') | map(attribute='hostname') | select('equalto', '*.dev.example.com') | list | length == 1
+          # the wildcard rules sit BEFORE the catch-all and AFTER every exact rule
+          - "_after[-2].hostname == '*.apps.example.com' and _after[-3].hostname == '*.dev.example.com'"
+        quiet: true
+      vars:
+        _after: "{{ _net.ingress | richard_lynch.network.hosting_edge_merge_ingress([_dev_rule, _prod_rule]) }}"
+
+    - name: A second merge is a no-op (idempotent)
+      ansible.builtin.assert:
+        that:
+          - _once | richard_lynch.network.hosting_edge_merge_ingress([_dev_rule, _prod_rule]) == _once
+        quiet: true
+      vars:
+        _once: "{{ _net.ingress | richard_lynch.network.hosting_edge_merge_ingress([_dev_rule, _prod_rule]) }}"
+
+    - name: Each unsafe merge is refused, for the stated reason
+      ansible.builtin.include_tasks: _expect_filter_error.yml
+      vars:
+        case: "{{ item }}"
+      loop:
+        - id: no-catch-all
+          before: "{{ _net.ingress[:-1] }}"
+          wanted: ["{{ _dev_rule }}"]
+          expect: "catch-all"
+        - id: two-catch-alls
+          before: "{{ _net.ingress + [{'service': 'http_status:404'}] }}"
+          wanted: ["{{ _dev_rule }}"]
+          expect: "catch-all"
+        - id: exact-hostname-not-a-wildcard
+          before: "{{ _net.ingress }}"
+          wanted: [{ hostname: "api.example.com", service: "http://evil.test:80" }]
+          expect: "only owns wildcard routes"
+      loop_control: { label: "{{ item.id }}" }
+
+    # ---------------------------------------------------------------- certificates
+    - name: Only an ACTIVE pack that NAMES the wildcard counts as covering it
+      ansible.builtin.assert:
+        that:
+          # Universal SSL covers *.example.com, one label deep, and does not name the two-level hosts
+          - _universal | richard_lynch.network.hosting_edge_cert_missing(_wild) == _wild
+          # an advanced pack that exists but is still validating serves nothing
+          - _pending | richard_lynch.network.hosting_edge_cert_missing(_wild) == _wild
+          # active and naming both -> nothing missing
+          - _active | richard_lynch.network.hosting_edge_cert_missing(_wild) == []
+          # active but naming only one -> the other is reported
+          - _half | richard_lynch.network.hosting_edge_cert_missing(_wild) == ['*.apps.example.com']
+          # case-insensitive
+          - _upper | richard_lynch.network.hosting_edge_cert_missing(_wild) == []
+        quiet: true
+      vars:
+        _universal: [{ type: universal, status: active, hosts: ["example.com", "*.example.com"] }]
+        _pending: [{ type: advanced, status: pending_validation, hosts: ["*.dev.example.com", "*.apps.example.com"] }]
+        _active: [{ type: advanced, status: active, hosts: ["*.dev.example.com", "*.apps.example.com"] }]
+        _half: [{ type: advanced, status: active, hosts: ["*.dev.example.com"] }]
+        _upper: [{ type: advanced, status: active, hosts: ["*.DEV.example.com", "*.Apps.example.com"] }]

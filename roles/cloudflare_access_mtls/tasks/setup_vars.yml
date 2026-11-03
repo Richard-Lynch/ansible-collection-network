@@ -1,0 +1,108 @@
+---
+# Shared setup for every entrypoint: validate inputs, build the API header, ensure the workdir,
+# and read the LIVE CA state. Included by main.yml and by each entrypoint when called directly,
+# so an entrypoint never depends on main.yml having run first.
+
+- name: Fail loudly if the Cloudflare API token is empty
+  # A token that resolved to '' produces a 400/401 indistinguishable from a missing permission —
+  # which makes a wrong 1Password FIELD look like a missing scope or an unavailable feature.
+  # Refuse before any call is made.
+  ansible.builtin.assert:
+    that:
+      - cloudflare_access_mtls_api_token | default('') | length > 0
+    fail_msg: >-
+      cloudflare_access_mtls_api_token is empty. The caller must resolve it from its secret store —
+      and must read the right FIELD (in 1Password an API Credential item uses 'credential', a
+      Password item uses 'password'; a missing field returns '' silently).
+    quiet: true
+
+- name: Build the Cloudflare API request header
+  ansible.builtin.set_fact:
+    _mtls_headers:
+      Authorization: "Bearer {{ cloudflare_access_mtls_api_token }}"
+      Content-Type: "application/json"
+    _mtls_api: "https://api.cloudflare.com/client/v4/accounts/{{ cloudflare_access_mtls_account_id }}"
+  no_log: true
+
+- name: Resolve the workdir and the CA's file paths
+  ansible.builtin.set_fact:
+    _mtls_workdir: "{{ cloudflare_access_mtls_workdir }}"
+    _mtls_ca_key: "{{ cloudflare_access_mtls_workdir }}/{{ cloudflare_access_mtls_ca_name }}.key"
+    _mtls_ca_crt: "{{ cloudflare_access_mtls_workdir }}/{{ cloudflare_access_mtls_ca_name }}.pem"
+
+- name: Ensure the gitignored working directory exists, owner-only
+  # 0700: the CA private key and every client key pass through here. The directory itself is
+  # meant to be ignored by version control, so nothing in it can be committed.
+  ansible.builtin.file:
+    path: "{{ _mtls_workdir }}"
+    state: directory
+    mode: "0700"
+
+- name: Read the account's registered mTLS CAs
+  ansible.builtin.uri:
+    url: "{{ _mtls_api }}/access/certificates"
+    headers: "{{ _mtls_headers }}"
+    method: GET
+    status_code: [200, 401, 403]
+    return_content: true
+  register: _mtls_ca_list
+  changed_when: false
+  # A read: it runs under --check too, so a check-mode run reports from real state.
+  check_mode: false
+  # no_log: the token travels in the Authorization header, and `uri` declares no no_log for
+  # `headers`, so keeping it out of the output would otherwise depend on Ansible version, verbosity
+  # and callback (measured absent on ansible-core 2.21, -vvv included; not guaranteed by the module,
+  # and the role supports 2.19+). The error statuses are accepted above and explained by the gate
+  # below, so the failure is still diagnosable.
+  no_log: true
+
+- name: HARD GATE — the token must be able to read the mTLS surface
+  ansible.builtin.assert:
+    that:
+      - _mtls_ca_list.status == 200
+    fail_msg: >-
+      Cannot read {{ _mtls_api }}/access/certificates — HTTP {{ _mtls_ca_list.status }}. The token
+      needs permission group "Access: Mutual TLS Certificates Read"
+      (4f3196a5c95747b6ad82e34e1d0a694f); writing also needs
+      "Access: Mutual TLS Certificates Write" (29d3afbfd4054af9accdd1118815ed05). A 403 here is
+      a SCOPE answer about this token, not a verdict on the account's plan.
+    quiet: true
+
+- name: Parse the CA list explicitly
+  # Parsed from `content | from_json`, not `.json`: `uri` only populates `.json` when the RESPONSE
+  # declares a JSON content-type, so reading `.json` can silently yield nothing and present as
+  # "no CAs are registered" when the truth is "I could not parse the reply".
+  ansible.builtin.set_fact:
+    _mtls_ca_parsed: "{{ _mtls_ca_list.content | from_json }}"
+
+- name: HARD GATE — the CA list must have been parseable
+  # Without this, "could not read it" and "nothing is there" are the same observation — and the
+  # second one would make the role generate a SECOND CA while the first still exists.
+  ansible.builtin.assert:
+    that:
+      - _mtls_ca_parsed.success | default(false)
+      - _mtls_ca_parsed.result is defined
+    fail_msg: >-
+      The response from {{ _mtls_api }}/access/certificates was not a parseable Cloudflare
+      envelope, so "how many CAs exist" is UNKNOWN rather than zero. Refusing to continue: a
+      wrong answer here would create a duplicate CA. Raw: {{ _mtls_ca_list.content | default('') | truncate(300) }}
+    quiet: true
+
+- name: Identify the CA this role manages, by name
+  ansible.builtin.set_fact:
+    _mtls_ca_live: >-
+      {{ (_mtls_ca_parsed.result | default([])
+          | selectattr('name', 'equalto', cloudflare_access_mtls_ca_name)
+          | list | first) | default(None) }}
+
+- name: Summarise live CA state
+  # `_mtls_ca_live` is literally `None` when no CA of this name exists, and `default({})` does NOT
+  # replace it — default() only substitutes for an UNDEFINED value, while None is defined. So
+  # `.get()` was called on NoneType and the task died on a fresh account, i.e. in exactly the
+  # from-scratch case this role exists to handle. `default({}, true)` (boolean_default) is the
+  # form that also replaces a falsy value such as None.
+  ansible.builtin.set_fact:
+    _mtls_ca_exists: "{{ _mtls_ca_live is not none }}"
+    _mtls_ca_hostnames_live: >-
+      {{ (_mtls_ca_live | default({}, true)).get('associated_hostnames', []) | default([], true) }}
+    _mtls_ca_id: "{{ (_mtls_ca_live | default({}, true)).get('id', '') }}"

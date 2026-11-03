@@ -1,0 +1,92 @@
+---
+# Build the new ingress list from the current one. Extracted into its own file for ONE reason: it
+# is the operation that can take every live service on a tunnel offline, so molecule must be able
+# to exercise THIS code rather than a copy of it. A test that re-derives the expression proves
+# nothing.
+#
+# Inputs:  _ingress_before (list), _fqdn (str), _endpoint_tunnel_service (str),
+#          _endpoint_origin_request (dict, may be empty)
+#
+# `originRequest` is carried on a new entry (by default `noTLSVerify: false`) because the
+# tunnel talks HTTPS to traefik, which presents a real cert. Omitting it on a new entry would leave
+# that hostname on cloudflared's defaults while its siblings are explicit, which is the kind of
+# difference nobody notices until one behaves unlike the others.
+# Outputs: _ingress_after (list)
+#
+# THE TRAP: `PUT /cfd_tunnel/{id}/configurations` REPLACES the entire ingress list. A request
+# carrying only the new rule DELETES every existing hostname. So: every existing rule that has a
+# hostname and is not ours, + ours, + the catch-all LAST. The catch-all is the rule with no
+# `hostname` key and it must stay final, or it swallows everything after it.
+- name: Build the new ingress list — append, and ADOPT existing rules verbatim
+  # TWO distinct behaviours, and conflating them takes live services down:
+  #
+  #   hostname NOT present -> append our rule (service = _endpoint_tunnel_service)
+  #   hostname IS  present -> carry the EXISTING rule through UNCHANGED
+  #
+  # WHY. Two tunnels can use different service values: one tunnel's rules may point at a proxy by
+  # its DNS name (`https://traefik.example.com`) while another's point at a container-local proxy
+  # (`https://traefik`). Rebuilding an existing rule from this call's service value would repoint
+  # every public service on the second tunnel at a proxy that has no routers for them — every one
+  # would 404, and a hostname-only gate would pass because the hostnames are all still there.
+  #
+  # Adoption must mean "this role now manages the record", never "this role rewrites the route".
+  #
+  # And an adopted rule stays WHERE IT IS. The merge used to drop it and re-append it before the
+  # catch-all, so a converged list came back REORDERED whenever the hostname was not already last;
+  # with several endpoints in one play each moved its own rule to the end, every run PUT a
+  # "different" list and reported changed. Now: the existing named rules verbatim and in order, ours appended only when
+  # absent, the catch-all last. A converged input comes back EQUAL, so the PUT is skipped.
+  ansible.builtin.set_fact:
+    _ingress_after: >-
+      {{ (_ingress_before | selectattr('hostname', 'defined') | list)
+         + ([] if _existing_rule else [_new_rule])
+         + (_ingress_before | rejectattr('hostname', 'defined') | list) }}
+  vars:
+    _origin: "{{ _endpoint_origin_request | default({}) }}"
+    _existing_rule: >-
+      {{ (_ingress_before | selectattr('hostname', 'defined')
+          | selectattr('hostname', 'eq', _fqdn) | list | first) | default('', true) }}
+    _new_rule: >-
+      {{ {'hostname': _fqdn, 'service': _endpoint_tunnel_service}
+         | combine({'originRequest': _origin} if (_origin | length) > 0 else {}) }}
+
+- name: HARD GATE — no pre-existing hostname may be lost, AND no rule may be rewritten
+  # The hostname check alone is not enough: an earlier version compared hostnames only, so a merge
+  # that preserved every name while silently repointing its `service` passed cleanly. Both the set
+  # of hostnames and the CONTENT of every pre-existing rule are asserted.
+  ansible.builtin.assert:
+    that:
+      - _lost | length == 0
+      - _mutated | length == 0
+      - (_ingress_after | rejectattr('hostname', 'defined') | list | length) == 1
+      - _ingress_after[-1].hostname is not defined
+    fail_msg: >-
+      Refusing to PUT.
+      {{ 'Dropped hostname(s): ' ~ _lost ~ '. ' if _lost | length > 0 else '' }}
+      {{ 'REWRITTEN rule(s): ' ~ _mutated ~ ' — adoption must not change how an existing service is
+      routed. ' if _mutated | length > 0 else '' }}
+      {{ 'Catch-all missing or not last. ' if (_ingress_after | rejectattr('hostname', 'defined')
+         | list | length) != 1 else '' }}
+      This endpoint replaces the WHOLE ingress list, so any of these takes services offline.
+    success_msg: >-
+      Ingress: {{ _ingress_before | selectattr('hostname', 'defined') | list | length }} existing
+      rule(s) carried through unchanged, {{ _fqdn }}
+      {{ 'adopted in place' if _was_present | bool else 'added' }}, catch-all last.
+    quiet: true
+  vars:
+    _before_names: >-
+      {{ _ingress_before | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}
+    _after_names: >-
+      {{ _ingress_after | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}
+    _lost: "{{ _before_names | difference(_after_names) }}"
+    _was_present: "{{ (_fqdn | default('')) in _before_names }}"
+    # Every rule that existed before must appear byte-identical afterwards.
+    _mutated: >-
+      {%- set out = [] -%}
+      {%- for b in (_ingress_before | selectattr('hostname', 'defined') | list) -%}
+      {%- set a = (_ingress_after | selectattr('hostname', 'defined')
+                   | selectattr('hostname', 'eq', b.hostname) | list | first) | default({}) -%}
+      {%- if a != b -%}{{ out.append(b.hostname ~ ': ' ~ (b.service | default('?'))
+                                     ~ ' -> ' ~ (a.service | default('GONE'))) or '' }}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}

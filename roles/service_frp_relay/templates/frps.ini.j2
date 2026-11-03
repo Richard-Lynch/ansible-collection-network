@@ -1,0 +1,20 @@
+[common]
+{# Control plane: the frpc client on the private side dials OUT to this port. #}
+bind_port = {{ frp_bind_port }}
+{# Shared secret: rotate it in your secret store and keep frps + frpc in lockstep. #}
+token = {{ frp_token }}
+
+{# Raw TCP passthrough to the proxy behind frpc. Only these ports may be published: #}
+allow_ports = {{ frp_allow_ports }}
+
+{% if frp_dashboard_enabled %}
+{# SECURITY: only enable the dashboard bound to loopback and reach it over an SSH tunnel.
+   Binding it to a public interface exposes an admin panel to the world. #}
+dashboard_addr = 127.0.0.1
+dashboard_port = {{ frp_dashboard_port }}
+dashboard_user = {{ frp_dashboard_user }}
+dashboard_pwd  = {{ frp_dashboard_pwd }}
+{% else %}
+{# Dashboard intentionally DISABLED. frps would otherwise serve it on all interfaces with basic
+   auth only. Re-enable only bound to 127.0.0.1. #}
+{% endif %}

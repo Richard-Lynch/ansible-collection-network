@@ -1,0 +1,107 @@
+---
+# The real role, twice over: once with only the required options (the defaults' shape), once with
+# every option set; then two runs that must be REFUSED. traefik_deploy is false throughout, so no
+# docker daemon is needed: everything up to the compose deploy runs for real.
+- name: Converge — required options only
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _base: /tmp/molecule-traefik
+    _required: &required
+      traefik_deploy: false
+      traefik_acme_email: admin@example.com
+      traefik_cf_api_email: admin@example.com
+      traefik_cf_dns_api_token: molecule-not-a-token
+      traefik_dashboard_host: traefik.example.com
+      traefik_cert_domain: example.com
+      traefik_cert_sans: "*.example.com"
+      traefik_dynamic_dir: "{{ playbook_dir }}/fixtures/dynamic"
+      # deployment_config chowns to root by default; the test runs unprivileged.
+      deployment_config_file_owner: "{{ lookup('ansible.builtin.pipe', 'id -un') }}"
+      deployment_config_file_group: "{{ lookup('ansible.builtin.pipe', 'id -gn') }}"
+  tasks:
+    - name: Start from an empty render directory
+      ansible.builtin.file:
+        path: "{{ _base }}"
+        state: absent
+      tags: [molecule-idempotence-notest]
+
+    - name: Run the role with the defaults
+      ansible.builtin.include_role:
+        name: service_traefik
+      vars:
+        <<: *required
+        traefik_config_dir: "{{ _base }}/defaults"
+
+    - name: Create the second run's route directory
+      ansible.builtin.file:
+        path: "{{ _base }}/full/config/dynamic"
+        state: directory
+        mode: "0755"
+
+    - name: Plant a route file that the next run retires
+      ansible.builtin.copy:
+        dest: "{{ _base }}/full/config/dynamic/retired.yml"
+        content: "---\nhttp: {}\n"
+        mode: "0644"
+      tags: [molecule-idempotence-notest]
+
+    - name: Run the role with every option set
+      ansible.builtin.include_role:
+        name: service_traefik
+      vars:
+        <<: *required
+        traefik_config_dir: "{{ _base }}/full"
+        traefik_container_name: edge-proxy
+        traefik_network: edge
+        traefik_bind_address: ""
+        traefik_http_port: 8080
+        traefik_https_port: 8443
+        traefik_servers_insecure_skip_verify: true
+        traefik_acme_resolver: le
+        traefik_dynamic_templates_dir: "{{ playbook_dir }}/fixtures/templates"
+        traefik_retired_dynamic_files: [retired.yml]
+        traefik_forward_auth_network: auth-net
+        traefik_forward_auth_subnet: 198.51.100.0/24
+        traefik_forward_auth_traefik_ip: 198.51.100.2
+        molecule_upstream_credential: "user:molecule-pass"
+
+    - name: A missing route directory must stop the run
+      block:
+        - name: Run the role with a route directory that does not exist
+          ansible.builtin.include_role:
+            name: service_traefik
+          vars:
+            <<: *required
+            traefik_config_dir: "{{ _base }}/missing"
+            traefik_dynamic_dir: "{{ playbook_dir }}/fixtures/no-such-dir"
+        - name: Not reached
+          ansible.builtin.set_fact:
+            _missing_refused: false
+      rescue:
+        - name: Record which task refused it
+          ansible.builtin.set_fact:
+            _missing_refused: "{{ ansible_failed_task.name is search('every route source directory exists') }}"
+
+    - name: A route file named like the role's own must stop the run
+      block:
+        - name: Run the role with a duplicated route file name
+          ansible.builtin.include_role:
+            name: service_traefik
+          vars:
+            <<: *required
+            traefik_config_dir: "{{ _base }}/dup"
+            traefik_dynamic_dir: "{{ playbook_dir }}/fixtures/dup"
+        - name: Not reached
+          ansible.builtin.set_fact:
+            _dup_refused: false
+      rescue:
+        - name: Record which task refused it
+          ansible.builtin.set_fact:
+            _dup_refused: "{{ ansible_failed_task.name is search('no route file name is supplied twice') }}"
+
+    - name: Keep the refusal results for verify
+      ansible.builtin.copy:
+        dest: "{{ _base }}/refusals.json"
+        content: "{{ {'missing': _missing_refused, 'dup': _dup_refused} | to_json }}"
+        mode: "0644"

@@ -1,0 +1,26 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+---
+DOCUMENTATION:
+  name: hosting_edge_winner_map
+  short_description: Map each hostname to the Access application that decides it
+  author: Richard Lynch (@Richard-Lynch)
+  description:
+    - Applies the C(hosting_edge_winner) rule to every hostname, de-duplicated and sorted.
+  options:
+    _input:
+      description: Access applications as the Cloudflare API returns them.
+      type: list
+      required: true
+    hosts:
+      description: The hostnames.
+      type: list
+      required: true
+EXAMPLES: |
+  - name: Record the winner of every host
+    ansible.builtin.set_fact:
+      winners: "{{ access_apps | richard_lynch.network.hosting_edge_winner_map(existing_hosts) }}"
+RETURN:
+  _value:
+    description: Hostname to winning application name (or null).
+    type: dict

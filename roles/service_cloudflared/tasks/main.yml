@@ -1,0 +1,27 @@
+---
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Reject a missing or placeholder tunnel token before anything is rendered
+  ansible.builtin.include_tasks: _guards.yml
+
+- name: Ensure config dir exists
+  ansible.builtin.file:
+    path: "{{ cloudflared_config_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render docker-compose (contains the tunnel token)
+  no_log: true # it renders a credential: --diff would print it into the run log (DIFFLEAK-01)
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ cloudflared_config_dir }}/docker-compose.yml"
+    mode: "0600"
+  notify: Restart cloudflared
+
+- name: Deploy the cloudflared stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ cloudflared_config_dir }}"
+    state: present
+    recreate: auto
+  when: cloudflared_deploy | default(true) | bool

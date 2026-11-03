@@ -1,0 +1,150 @@
+---
+# Asserts the role's OUTPUT, never a re-derivation of its logic.
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Load what the role produced
+      ansible.builtin.set_fact:
+        _r: "{{ lookup('file', '/tmp/molecule_service_public_endpoint.json') | from_json }}"
+        _fixture: "{{ lookup('file', 'files/tunnel_second.json') | from_json }}"
+
+    - name: Every pre-existing hostname must survive the merge
+      # THE assertion. The configurations endpoint replaces the whole list, so a merge that drops
+      # entries takes those services offline.
+      ansible.builtin.assert:
+        that:
+          - _missing | length == 0
+        fail_msg: >-
+          The merge DROPPED {{ _missing }}. On a real tunnel that is a live service going
+          offline the moment this is PUT.
+        success_msg: "All {{ _before | length }} pre-existing hostnames survived."
+        quiet: true
+      vars:
+        _before: >-
+          {{ _fixture.result.config.ingress | selectattr('hostname', 'defined')
+             | map(attribute='hostname') | list }}
+        _after: >-
+          {{ _r.new | selectattr('hostname', 'defined') | map(attribute='hostname') | list }}
+        _missing: "{{ _before | difference(_after) }}"
+
+    - name: The new hostname must be present exactly once
+      ansible.builtin.assert:
+        that:
+          - (_r.new | selectattr('hostname', 'defined')
+             | selectattr('hostname', 'eq', 'grafana.example.com') | list | length) == 1
+        fail_msg: "grafana.example.com is missing or duplicated in the merged ingress list."
+        success_msg: "grafana.example.com added exactly once."
+        quiet: true
+
+    - name: The catch-all must be last, and unique
+      # A catch-all that is not final swallows every rule after it — the tunnel would 404 for
+      # hostnames that are configured and look correct in the list.
+      ansible.builtin.assert:
+        that:
+          - (_r.new | rejectattr('hostname', 'defined') | list | length) == 1
+          - _r.new[-1].hostname is not defined
+          - _r.new[-1].service == 'http_status:404'
+        fail_msg: >-
+          Catch-all is missing, duplicated, or not last (last entry:
+          {{ _r.new[-1] }}). Everything after a catch-all is unreachable.
+        success_msg: "Exactly one catch-all, and it is last."
+        quiet: true
+
+    - name: Re-adding an EXISTING hostname must not duplicate it
+      ansible.builtin.assert:
+        that:
+          - (_r.existing | selectattr('hostname', 'defined')
+             | selectattr('hostname', 'eq', 'foxtrot.example.com') | list | length) == 1
+          - (_r.existing | selectattr('hostname', 'defined') | list | length)
+            == (_fixture.result.config.ingress | selectattr('hostname', 'defined') | list | length)
+        fail_msg: >-
+          Re-adding foxtrot.example.com changed the hostname count — the role is not idempotent on
+          the ingress list.
+        success_msg: "Re-adding an existing hostname is idempotent."
+        quiet: true
+
+    - name: Re-adding an EXISTING hostname must return the list UNCHANGED, order included
+      # The count above passed while the merge moved the rule to the end: same names, different
+      # order, so every re-run PUT a "new" list and reported changed. Equality is what lets
+      # public_surface.yml skip the PUT on a converged tunnel.
+      ansible.builtin.assert:
+        that:
+          - _r.existing == _fixture.result.config.ingress
+          - _r.adopt == _fixture.result.config.ingress
+        fail_msg: >-
+          Merging an existing hostname changed the ingress list (order or content):
+          {{ _r.existing | map(attribute='hostname', default='<catch-all>') | list }} vs
+          {{ _fixture.result.config.ingress | map(attribute='hostname', default='<catch-all>') | list }}.
+        success_msg: "A converged ingress list merges to itself."
+        quiet: true
+
+    - name: Adopting an existing hostname must NOT rewrite its service value
+      # The blocker this test exists for. Converge passed the NETWORK traefik's service value while
+      # adopting a hostname of the SECOND tunnel; the rule must come through with its own value intact.
+      ansible.builtin.assert:
+        that:
+          - _adopted.service == 'https://traefik'
+        fail_msg: >-
+          Adoption REWROTE foxtrot's route to '{{ _adopted.service | default('MISSING') }}'.
+          The second tunnel serves `https://traefik` (its own, container-local traefik);
+          traefik.example.com is a different proxy with no routers for it — every public service
+          on that tunnel would 404 while a hostname-only check reported success.
+        success_msg: "Adoption carried foxtrot's existing rule through unchanged."
+        quiet: true
+      vars:
+        _adopted: >-
+          {{ _r.adopt | selectattr('hostname', 'defined')
+             | selectattr('hostname', 'eq', 'foxtrot.example.com') | first }}
+
+    - name: Adoption must leave EVERY pre-existing rule byte-identical
+      ansible.builtin.assert:
+        that:
+          - _diff | length == 0
+        fail_msg: "Adoption mutated pre-existing rule(s): {{ _diff }}"
+        success_msg: "All {{ _before | length }} pre-existing rules unchanged by adoption."
+        quiet: true
+      vars:
+        _before: "{{ _fixture.result.config.ingress | selectattr('hostname', 'defined') | list }}"
+        _diff: >-
+          {%- set out = [] -%}
+          {%- for b in _before -%}
+          {%- set a = (_r.adopt | selectattr('hostname', 'defined')
+                       | selectattr('hostname', 'eq', b.hostname) | list | first) | default({}) -%}
+          {%- if a != b -%}{{ out.append(b.hostname) or '' }}{%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Every Access case was run
+      ansible.builtin.assert:
+        that:
+          - _r.access.keys() | list | sort == (_expect.keys() | list | sort)
+        fail_msg: "Access cases recorded {{ _r.access.keys() | list | sort }}, expected {{ _expect.keys() | list | sort }}."
+        quiet: true
+
+    - name: Access — each case PASSED or was REFUSED as it must be, with the right winner
+      # Coverage is not authentication. If a bypassed or unreadable host ever PASSED, the role's
+      # gate would report a name as protected while it was reachable without login.
+      ansible.builtin.assert:
+        that:
+          - _r.access[item.key].passed == item.value.passed
+          - _r.access[item.key].winner == item.value.winner
+        fail_msg: >-
+          {{ item.key }}: the role's Access gate {{ 'PASSED' if _r.access[item.key].passed else 'REFUSED' }}
+          with winner '{{ _r.access[item.key].winner }}'; expected
+          {{ 'PASS' if item.value.passed else 'REFUSE' }} with winner '{{ item.value.winner }}'.
+        success_msg: "{{ item.key }}: {{ 'passed' if item.value.passed else 'refused' }} (winner {{ item.value.winner }}), as required."
+        quiet: true
+      loop: "{{ _expect | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+  vars:
+    _expect:
+      grafana.example.com: {passed: true, winner: wildcard}
+      open-a.example.com: {passed: false, winner: Bypass A}
+      open-b.example.com: {passed: false, winner: Bypass B}
+      multi-2.example.com: {passed: false, winner: Multi}
+      unread.example.com: {passed: false, winner: Unreadable}
+      lonely.example.org: {passed: false, winner: NONE}
+      apps-unreadable: {passed: false, winner: NONE}

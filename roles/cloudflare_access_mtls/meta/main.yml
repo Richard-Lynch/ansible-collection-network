@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Cloudflare Access mTLS client CA and client-certificate lifecycle: generate or adopt the CA,
+    keep its key in 1Password, upload and associate it, and issue declared per-device certificates.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [cloudflare, mtls, certificates, zerotrust]
+dependencies: []

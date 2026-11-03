@@ -1,0 +1,25 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/cloudflare_hosting_edge/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate cloudflare_hosting_edge
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      acm
+
+# Field of that item holding the token. API Credential items use credential, Password items use password.
+cloudflare_hosting_edge_token_field__default: credential
+
+# Generate-don't-apply. False reads, gates and reports; true writes and reads back.
+cloudflare_hosting_edge_apply__default: false
+
+# Certificate authority for the pack.
+cloudflare_hosting_edge_acm_ca__default: lets_encrypt
+
+# Pack validity in days.
+cloudflare_hosting_edge_acm_validity_days__default: 90
+
+# How long to wait for the pack to become active (DCV can take minutes).
+cloudflare_hosting_edge_acm_wait_s__default: 1800

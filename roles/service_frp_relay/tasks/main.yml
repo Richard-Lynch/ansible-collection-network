@@ -1,0 +1,39 @@
+---
+# service_frp_relay — deploy/converge an frps relay to a dashboard-safe config.
+#
+# Applying a changed config restarts frps, which briefly drops every path relayed through it. Gate a
+# live run behind an explicit apply flag in the calling play rather than a default converge.
+#
+# The template disables the dashboard by default and, if re-enabled, binds it to 127.0.0.1: frps's
+# own default serves it on every interface, with basic auth only.
+
+- name: Reject a missing or placeholder secret before anything is rendered
+  ansible.builtin.include_tasks: _guards.yml
+
+- name: Ensure frps deploy dir exists
+  ansible.builtin.file:
+    path: "{{ frp_deploy_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render frps.ini (dashboard off / loopback-only)
+  no_log: true # it renders a credential: --diff would print it into the run log (DIFFLEAK-01)
+  ansible.builtin.template:
+    src: frps.ini.j2
+    dest: "{{ frp_deploy_dir }}/frps.ini"
+    mode: "0600"
+  register: frps_conf
+
+- name: Render frps docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ frp_deploy_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: frps_compose
+
+- name: Converge frps (only when config changed) — RESTARTS the public relay
+  community.docker.docker_compose_v2:
+    project_src: "{{ frp_deploy_dir }}"
+    state: present
+  when: (frps_conf is changed or frps_compose is changed)
+  # See header: a brief interruption of the relayed paths on restart.

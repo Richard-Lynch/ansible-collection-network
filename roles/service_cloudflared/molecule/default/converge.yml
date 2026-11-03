@@ -1,0 +1,64 @@
+# Render the cloudflared compose template into a temp dir (no live host, no real tunnel) so
+# verify.yml can assert on it.
+---
+- name: Converge (render-only)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../../defaults/main.yml"   # load the role's generated defaults (__default vars)
+  tasks:
+    - name: Set only the vars this scenario deliberately overrides
+      # Everything else is resolved by the ROLE'S OWN generated resolver below, deliberately.
+      ansible.builtin.set_fact:
+        cloudflared_config_dir: "/tmp/molecule-cloudflared-render"
+        # Never a real token in CI: an obviously-fake but non-placeholder value.
+        cloudflared_tunnel_token: "TEST_TOKEN_NOT_REAL"
+
+    - name: Resolve the rest via the role's OWN generated resolver
+      # INCLUDED, not hand-mirrored: a hand-copied resolver drifts the moment the role gains a
+      # variable, and the scenario then fails with "'<var>' is undefined" — a test broken by a
+      # correct role change. Including the real file also exercises the role's actual resolution
+      # logic. Rendering the role's template directly (below) is deliberate: it tests the real
+      # template, not a stub plus a re-derived filter chain.
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_resolve_defaults.yml"
+
+    - name: The role's OWN guard accepts the fake token
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_guards.yml"
+
+    - name: The role's OWN guard REFUSES a placeholder token
+      block:
+        - name: Put a placeholder in force (set_fact, so it outranks the converge's own)
+          ansible.builtin.set_fact:
+            cloudflared_tunnel_token: "CHANGE_ME"
+
+        - name: Run the guard
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_guards.yml"
+
+        - name: Reaching here means the guard ACCEPTED a placeholder
+          ansible.builtin.set_fact:
+            _placeholder_accepted: true
+      rescue:
+        - name: Refused, as required
+          ansible.builtin.debug:
+            msg: placeholder token refused
+      always:
+        - name: Restore the fake token
+          ansible.builtin.set_fact:
+            cloudflared_tunnel_token: "TEST_TOKEN_NOT_REAL"
+
+    - name: HARD GATE — the placeholder was refused
+      ansible.builtin.assert:
+        that: ["not (_placeholder_accepted | default(false))"]
+        fail_msg: service_cloudflared's guard accepted a placeholder token
+
+    - name: Ensure render dir exists
+      ansible.builtin.file:
+        path: "{{ cloudflared_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render docker-compose from the role template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../templates/docker-compose.yml.j2"
+        dest: "{{ cloudflared_config_dir }}/docker-compose.yml"
+        mode: "0600"

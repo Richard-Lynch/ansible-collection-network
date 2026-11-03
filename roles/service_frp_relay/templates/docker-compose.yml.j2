@@ -1,0 +1,10 @@
+services:
+  frps:
+    image: fatedier/frps:{{ frp_version }}
+    restart: unless-stopped
+    volumes:
+      - ./frps.ini:/etc/frp/frps.ini:ro
+    command: ["-c", "/etc/frp/frps.ini"]
+    # host network binds the control port (7000) and the public 80/443.
+    # NOTE: with the dashboard disabled, nothing else should be published.
+    network_mode: host

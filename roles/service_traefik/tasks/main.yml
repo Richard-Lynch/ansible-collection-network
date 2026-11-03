@@ -1,0 +1,159 @@
+---
+# service_traefik — Traefik as a reverse proxy with Cloudflare DNS-01 certificates (Docker Compose).
+#
+# The ACME store (letsencrypt/acme.json) holds issued private keys: it is runtime state, created by
+# Traefik on the host and never rendered by this role.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Assert the credentials were supplied (never ship a placeholder)
+  ansible.builtin.assert:
+    that:
+      - traefik_cf_api_email | length > 0
+      - not (traefik_cf_api_email is search('(?i)change.?me|placeholder|replace.?me|^todo|^xxx'))
+      - traefik_cf_dns_api_token | length > 0
+      - not (traefik_cf_dns_api_token is search('(?i)change.?me|placeholder|replace.?me|^todo|^xxx'))
+    fail_msg: traefik_cf_api_email and traefik_cf_dns_api_token must be supplied (from a secret store).
+    quiet: true
+  no_log: true
+
+# A fileglob over a directory that does not exist yields nothing, and copying nothing reports
+# success — so a mistyped path would deploy a proxy with no routes and say ok.
+- name: Read the route source directories on the controller
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  delegate_to: localhost
+  become: false
+  register: _traefik_src_dirs
+  loop: "{{ [traefik_dynamic_dir] + ([traefik_dynamic_templates_dir] if traefik_dynamic_templates_dir | length > 0 else []) }}"
+
+- name: HARD GATE — every route source directory exists
+  ansible.builtin.assert:
+    that:
+      - _traefik_src_dirs.results | rejectattr('stat.isdir', 'defined') | list | length == 0
+      - _traefik_src_dirs.results | selectattr('stat.isdir', 'defined') | rejectattr('stat.isdir') | list | length == 0
+    fail_msg: >-
+      Route source directory missing or not a directory:
+      {{ _traefik_src_dirs.results | rejectattr('stat.isdir', 'defined') | map(attribute='item') | list
+         + (_traefik_src_dirs.results | selectattr('stat.isdir', 'defined') | rejectattr('stat.isdir') | map(attribute='item') | list) }}.
+    quiet: true
+
+- name: Store vars
+  ansible.builtin.set_fact:
+    traefik_config_dir: "{{ traefik_config_dir if traefik_config_dir | length > 0 else '/opt/' ~ traefik_container_name }}"
+    # Bound HERE, not in the include's vars: there `role_path` would resolve to the included role's.
+    _traefik_base_src: "{{ role_path }}/files/base"
+    _traefik_builtin_dynamic: "{{ query('ansible.builtin.fileglob', role_path ~ '/files/dynamic/*') }}"
+    _traefik_caller_dynamic: "{{ query('ansible.builtin.fileglob', traefik_dynamic_dir ~ '/*') }}"
+    _traefik_caller_templates: >-
+      {{ query('ansible.builtin.fileglob', traefik_dynamic_templates_dir ~ '/*.j2')
+         if traefik_dynamic_templates_dir | length > 0 else [] }}
+
+# Two sources writing the same destination name would make the result depend on loop order.
+- name: HARD GATE — no route file name is supplied twice
+  ansible.builtin.assert:
+    that:
+      - _traefik_dest_names | length == _traefik_dest_names | unique | length
+    fail_msg: >-
+      Duplicate route file name(s) across the role's built-in files, traefik_dynamic_dir and
+      traefik_dynamic_templates_dir: {{ _traefik_dest_names | community.general.counter | dict2items
+      | selectattr('value', 'gt', 1) | map(attribute='key') | list }}.
+    quiet: true
+  vars:
+    _traefik_dest_names: >-
+      {{ (_traefik_builtin_dynamic + _traefik_caller_dynamic) | map('basename') | list
+         + (_traefik_caller_templates | map('basename') | map('regex_replace', '\.j2$', '') | list) }}
+
+- name: Deploy base config (compose, app.env, static traefik.yml)
+  ansible.builtin.include_role:
+    name: richard_lynch.common.deployment_config
+    # deployment_config renders every .j2 in the source dir with a template task that has no
+    # no_log, and some of them carry credentials: --diff would print them (DIFFLEAK-01).
+    apply:
+      no_log: true
+  vars:
+    deployment_config_source: "{{ _traefik_base_src }}"
+    deployment_config_destination: "{{ traefik_config_dir }}"
+
+- name: Ensure the dynamic + letsencrypt directories exist
+  ansible.builtin.file:
+    path: "{{ traefik_config_dir }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - config/dynamic
+    - letsencrypt
+
+- name: Deploy the plain dynamic route files (no secrets)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ traefik_config_dir }}/config/dynamic/{{ item | basename }}"
+    mode: "0644"
+  loop: "{{ _traefik_builtin_dynamic + _traefik_caller_dynamic }}"
+  notify: Restart traefik
+
+- name: Render the secret-bearing dynamic route files
+  ansible.builtin.template:
+    src: "{{ item }}"
+    dest: "{{ traefik_config_dir }}/config/dynamic/{{ item | basename | regex_replace('\\.j2$', '') }}"
+    mode: "0640"
+  loop: "{{ _traefik_caller_templates }}"
+  notify: Restart traefik
+  no_log: true
+
+- name: Remove retired dynamic route files (their routes stay live while the file exists)
+  ansible.builtin.file:
+    path: "{{ traefik_config_dir }}/config/dynamic/{{ item }}"
+    state: absent
+  loop: "{{ traefik_retired_dynamic_files }}"
+  notify: Restart traefik
+
+- name: Ensure docker network exists
+  community.docker.docker_network:
+    name: "{{ traefik_network }}"
+    attachable: true
+    state: present
+  when: traefik_deploy | bool
+
+# The forward-auth network: an auth service that accepts callers by source address needs Traefik at
+# a fixed address on a network nothing else can join — so it must be INTERNAL and at the declared
+# subnet. The network belongs to the auth service; this role only joins it.
+- name: Forward-auth network
+  when: traefik_forward_auth_network | length > 0
+  block:
+    - name: HARD GATE — the forward-auth network is fully declared
+      ansible.builtin.assert:
+        that:
+          - traefik_forward_auth_subnet is ansible.utils.ipv4
+          - traefik_forward_auth_traefik_ip | ansible.utils.ipaddr(traefik_forward_auth_subnet) | length > 0
+        fail_msg: >-
+          traefik_forward_auth_subnet must be an IPv4 network and traefik_forward_auth_traefik_ip an
+          address inside it: '{{ traefik_forward_auth_network }}' {{ traefik_forward_auth_subnet }}
+          {{ traefik_forward_auth_traefik_ip }}.
+        quiet: true
+
+    - name: Read the forward-auth network
+      community.docker.docker_network_info:
+        name: "{{ traefik_forward_auth_network }}"
+      register: _traefik_fa_net
+      when: traefik_deploy | bool
+
+    - name: HARD GATE — it exists, is internal and has the declared subnet
+      ansible.builtin.assert:
+        that:
+          - _traefik_fa_net.exists
+          - _traefik_fa_net.network.Internal | bool
+          - _traefik_fa_net.network.IPAM.Config[0].Subnet == traefik_forward_auth_subnet
+        fail_msg: >-
+          docker network '{{ traefik_forward_auth_network }}' is missing, not internal, or not
+          {{ traefik_forward_auth_subnet }}. Deploy the forward-auth service (which owns it) first.
+        quiet: true
+      when: traefik_deploy | bool
+
+- name: Deploy Docker Stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ traefik_config_dir }}"
+    state: present
+    recreate: auto
+  when: traefik_deploy | bool

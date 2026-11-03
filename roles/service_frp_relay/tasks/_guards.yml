@@ -1,0 +1,30 @@
+---
+# Reject a missing or placeholder secret BEFORE anything is rendered. `required: true` in the
+# argspec proves only that a value was supplied — a "CHANGEME"-style value satisfies it and would
+# run a public relay on a publicly known shared secret, so anyone could connect an frpc and publish
+# ports through it.
+- name: HARD GATE — frp_token is supplied and is not a placeholder
+  ansible.builtin.assert:
+    that:
+      - frp_token is string
+      - frp_token | length >= 16
+      - not (frp_token is search('(?i)change.?me|placeholder|replace.?me|^todo|^xxx'))
+    fail_msg: >-
+      frp_token must be a real shared secret (at least 16 characters, from a secret store) — it is
+      missing, too short or a placeholder.
+    quiet: true
+  no_log: true
+
+- name: HARD GATE — an enabled dashboard has a real password
+  ansible.builtin.assert:
+    that:
+      - frp_dashboard_pwd is defined
+      - frp_dashboard_pwd is string
+      - frp_dashboard_pwd | length >= 12
+      - not (frp_dashboard_pwd is search('(?i)change.?me|placeholder|replace.?me|^todo|^xxx'))
+    fail_msg: >-
+      frp_dashboard_enabled is true, so frp_dashboard_pwd must be a real password (at least 12
+      characters, from a secret store) — it is missing, too short or a placeholder.
+    quiet: true
+  no_log: true
+  when: frp_dashboard_enabled | bool
