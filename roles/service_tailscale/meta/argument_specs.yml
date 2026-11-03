@@ -1,0 +1,75 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_tailscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_tailscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Install Tailscale and join a node, optionally as subnet router/exit node
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      tailscale_login_server:
+        description:
+          - Control server URL (a Headscale instance), e.g. https://hs.example.com:8443.
+        type: str
+        required: true
+      tailscale_auth_key:
+        description:
+          - Pre-auth key, consumed ONLY when the node is not already logged in to
+          - tailscale_login_server. A node that is already joined ignores it, so a
+          - re-run needs no new key. Tags come from the key, not from this role.
+        type: str
+        required: false
+        default: ''
+        no_log: true
+      tailscale_hostname:
+        description:
+          - Name the node registers under (its MagicDNS label).
+        type: str
+        required: true
+      tailscale_advertise_routes:
+        description:
+          - Subnets this node routes for the tailnet (subnet router).
+        type: list
+        required: false
+        default: []
+        elements: str
+      tailscale_advertise_exit_node:
+        description:
+          - Offer this node as an exit node for all internet traffic.
+        type: bool
+        required: false
+        default: false
+      tailscale_accept_dns:
+        description:
+          - "Let the control server rewrite this node's resolver. Off by default: on a"
+          - server — and above all on a DNS server — the tailnet must not take over
+          - the host's own name resolution.
+        type: bool
+        required: false
+        default: false
+      tailscale_accept_routes:
+        description:
+          - Install other nodes' subnet routes. Off for a subnet router, which is
+          - already ON the networks it advertises.
+        type: bool
+        required: false
+        default: false
+      tailscale_tun_path:
+        description:
+          - TUN device the role requires before installing anything. Overridable
+          - only so a test can prove the gate fires.
+        type: str
+        required: false
+        default: /dev/net/tun
+      tailscale_version:
+        description:
+          - Pinned package version from pkgs.tailscale.com/stable.
+        type: str
+        required: false
+        default: 1.104.1

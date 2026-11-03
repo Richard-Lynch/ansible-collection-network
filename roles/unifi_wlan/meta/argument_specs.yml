@@ -1,0 +1,81 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/unifi_wlan/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate unifi_wlan
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Create or update a WLAN (SSID) on the UniFi controller
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      unifi_wlan_ssid:
+        description: The SSID to create or update.
+        type: str
+        required: true
+      unifi_wlan_network_name:
+        description: Name of the UniFi network the SSID attaches to. This decides the VLAN clients land on, and therefore which DHCP server they reach.
+        type: str
+        required: true
+      unifi_wlan_passphrase:
+        description: WPA passphrase. Never defaulted, never logged.
+        type: str
+        required: true
+      unifi_wlan_model_ssid:
+        description: An EXISTING SSID whose radio/roaming settings a new WLAN is modelled on. The UniFi API replaces whole objects, so a WLAN built from scratch would drop ~55 fields the controller actually sets.
+        type: str
+        required: true
+      unifi_wlan_hidden:
+        type: bool
+        required: false
+        default: false
+      unifi_wlan_enabled:
+        type: bool
+        required: false
+        default: true
+      unifi_wlan_security:
+        type: str
+        required: false
+        default: wpapsk
+      unifi_wlan_wpa_mode:
+        type: str
+        required: false
+        default: wpa2
+      unifi_wlan_wpa3_support:
+        type: bool
+        required: false
+        default: false
+      unifi_wlan_wpa3_transition:
+        type: bool
+        required: false
+        default: false
+      unifi_wlan_pmf_mode:
+        description: '802.11w protected management frames: disabled|optional|required.'
+        type: str
+        required: false
+        default: optional
+      unifi_wlan_apply:
+        description: "Generate-don't-apply: report the plan unless explicitly true."
+        type: bool
+        required: false
+        default: false
+      unifi_wlan_host:
+        description: Address of the UniFi controller.
+        type: str
+        required: true
+      unifi_wlan_site:
+        type: str
+        required: false
+        default: default
+      unifi_wlan_validate_certs:
+        type: bool
+        required: false
+        default: false
+      unifi_wlan_api_key:
+        description: UniFi API key for the X-API-KEY header. Never defaulted, never logged.
+        type: str
+        required: true

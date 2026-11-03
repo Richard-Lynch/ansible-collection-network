@@ -1,0 +1,93 @@
+---
+# service_pihole — deploy/reconcile Pi-hole (ad-block / forwarding DNS).
+
+- name: Assert a web password was supplied (never ship the placeholder)
+  ansible.builtin.assert:
+    that:
+      - pihole_web_password != "CHANGE_ME_VIA_1PASSWORD"
+      - pihole_web_password | length > 0
+    fail_msg: "pihole_web_password must be supplied (from your secrets manager)."
+    quiet: true
+
+- name: Ensure config dirs exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ pihole_config_dir }}"
+    - "{{ pihole_config_dir }}/etc-pihole"
+
+- name: Render docker-compose
+  # It carries the web password (FTLCONF_webserver_api_password), so: no_log (a --diff run would
+  # print it into the run output), and 0600 — only root's docker compose reads this file.
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ pihole_config_dir }}/docker-compose.yml"
+    mode: "0600"
+  no_log: true
+  notify: Restart pihole
+
+- name: Seed the adlists (gravity source of truth)
+  ansible.builtin.template:
+    src: adlists.list.j2
+    dest: "{{ pihole_config_dir }}/etc-pihole/adlists.list"
+    mode: "0644"
+  register: _adlists
+  notify: Restart pihole
+
+- name: Deploy the pihole docker stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ pihole_config_dir }}"
+    state: present
+    recreate: auto
+  when: pihole_deploy | default(true) | bool
+
+- name: Wait for pihole to be healthy (gravity DB initialised) before rebuilding gravity
+  # check_mode: false — this only READS container health (docker inspect). Without it, a preview run
+  # aborts here with "Command would have run if not in check mode", so a generate-don't-apply preview
+  # could never report cleanly. A preview that cannot complete is a preview
+  # nobody trusts.
+  check_mode: false
+  ansible.builtin.command:
+    cmd: "docker inspect -f {% raw %}{{.State.Health.Status}}{% endraw %} {{ pihole_service_name }}"
+  register: _ph_health
+  until: _ph_health.stdout == "healthy"
+  retries: 30
+  delay: 5
+  changed_when: false
+  # failed_when:false so the retry loop runs to completion and the assert below can report the
+  # ACTUAL last-seen health rather than a bare "non-zero rc" from docker inspect.
+  failed_when: false
+  when:
+    - pihole_deploy | default(true) | bool
+    - _adlists.changed | default(false)
+
+- name: Assert pihole actually reached healthy before touching gravity
+  # A retry loop paired with failed_when:false exhausts its retries and then CONTINUES, so without
+  # this the play would walk on to rebuild gravity against a container that never became healthy —
+  # reporting success either way.
+  ansible.builtin.assert:
+    that:
+      - _ph_health.stdout | default('') | trim == 'healthy'
+    fail_msg: >-
+      {{ pihole_service_name }} did not report healthy after
+      {{ 30 * 5 }}s — last status: '{{ _ph_health.stdout | default('(no answer)') | trim }}'.
+      Rebuilding gravity now would run against an uninitialised gravity DB, so stopping here.
+    success_msg: "{{ pihole_service_name }} is healthy; safe to rebuild gravity."
+    quiet: true
+  when:
+    - pihole_deploy | default(true) | bool
+    - _adlists.changed | default(false)
+
+- name: Rebuild gravity from adlists (when adlists changed or on first deploy)
+  ansible.builtin.command:
+    cmd: "docker exec {{ pihole_service_name }} pihole -g"
+  register: _gravity
+  until: _gravity.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: true
+  when:
+    - pihole_deploy | default(true) | bool
+    - _adlists.changed | default(false)

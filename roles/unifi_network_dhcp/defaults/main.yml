@@ -1,0 +1,26 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/unifi_network_dhcp/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate unifi_network_dhcp
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# UniFi site name — the controller's internal reference, not the display name.
+unifi_network_dhcp_site__default: default
+
+# API key sent as the X-API-KEY header. Supply it from a secrets manager; the placeholder is rejected. A lookup that silently returns an empty string makes every request 401 in a way that looks like a scope error, so check the lookup before the key.
+unifi_network_dhcp_api_key__default: CHANGE_ME_VIA_1PASSWORD
+
+# Whether to validate the controller's TLS certificate. The UDM presents a self-signed cert.
+unifi_network_dhcp_validate_certs__default: false
+
+# Desired per-network state. Any setting omitted from an entry is left exactly as the controller has it — this role is a reconciler, not a template.
+unifi_network_dhcp_networks__default: []
+
+# When false (the default) the role reports the computed diff and changes nothing.
+# Set true to PUT the changes. This edits the router every VLAN depends on — always run once with false and read the diff first.
+unifi_network_dhcp_apply__default: false

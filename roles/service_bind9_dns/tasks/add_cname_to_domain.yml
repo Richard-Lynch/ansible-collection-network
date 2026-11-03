@@ -1,0 +1,51 @@
+---
+# A service registers a CNAME in a zone. Idempotent, present/absent.
+# Requires: bind9_parent_domain (the zone), bind9_sub_domain (the label), bind9_domain (the target FQDN,
+# without trailing dot — added here). Optional: bind9_state (present|absent, default present).
+
+- name: "Add_cname — zone must exist first"
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones/{{ bind9_parent_domain }}.zone"
+  register: _zone
+
+- name: "Add_cname — fail if the zone is missing"
+  ansible.builtin.fail:
+    msg: "Zone '{{ bind9_parent_domain }}' not found — create it with add_domain/add_vlan first."
+  when: not _zone.stat.exists
+
+- name: "Add_cname — is the zone static or dynamic"
+  ansible.builtin.include_tasks: _record_zone_kind.yml
+
+- name: "Add_cname — dynamic zone: not written, checked read-only"
+  ansible.builtin.include_tasks: _dynamic_skip.yml
+  vars:
+    _ds_type: CNAME
+    _ds_fqdn: "{{ bind9_sub_domain }}.{{ bind9_parent_domain }}"
+    _ds_value: "{{ bind9_domain }}."
+  when:
+    - _rz_dynamic | bool
+    - not (bind9_record_infra_exception | default(false) | bool)
+
+# The INFRASTRUCTURE EXCEPTION (bind9_record_infra_exception): a name in a dynamic zone that can
+# never lease is reconciled over RFC 2136 against what bind9 serves (_dynamic_record.yml), never by
+# editing the journaled file.
+- name: "Add_cname — dynamic zone, infrastructure exception: reconcile over RFC 2136"
+  ansible.builtin.include_tasks: _dynamic_record.yml
+  vars:
+    _dr_type: CNAME
+    _dr_fqdn: "{{ bind9_sub_domain }}.{{ bind9_parent_domain }}"
+    _dr_value: "{{ bind9_domain }}."
+  when:
+    - _rz_dynamic | bool
+    - bind9_record_infra_exception | default(false) | bool
+
+- name: "Add_cname — {{ bind9_state | default('present') }} CNAME {{ bind9_sub_domain }}.{{ bind9_parent_domain }} -> {{ bind9_domain }}"
+  when: not (_rz_dynamic | bool)
+  ansible.builtin.blockinfile:
+    path: "{{ bind9_config_dir }}/zones/{{ bind9_parent_domain }}.zone"
+    marker: "; {mark} ANSIBLE MANAGED CNAME: {{ bind9_sub_domain }}.{{ bind9_parent_domain }}"
+    block: "{{ bind9_sub_domain }}\t\tIN\t\tCNAME\t\t{{ bind9_domain }}."
+    state: "{{ bind9_state | default('present') }}"
+    mode: "0644"
+    create: false
+  notify: Restart bind9

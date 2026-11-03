@@ -1,0 +1,38 @@
+[Unit]
+# MANAGED BY ANSIBLE — roles/config_vlan_probe/templates/broadcast-relay.service.j2
+Description=UDP broadcast relay between VLAN legs (LAN game discovery)
+Documentation=file://{{ config_vlan_probe_relay_script }}
+# The legs are DHCP-leased per VLAN; the relay binds each socket to a named interface, which
+# must exist and be up first.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# The RESOLVED relays (interface names read from the guest's own facts at deploy) are passed as
+# JSON, so this unit carries no installation configuration of its own and a changed relay is a changed
+# ExecStart. Single-quoted: the JSON contains double quotes.
+ExecStart=/usr/bin/python3 {{ config_vlan_probe_relay_script }} '{{ {"relays": _cvp_relays_resolved, "rate": config_vlan_probe_relay_rate | int, "status_file": "/run/iaac-broadcast-relay/status.json"} | to_json }}'
+Restart=always
+RestartSec=3
+RuntimeDirectory=iaac-broadcast-relay
+
+# ONE capability, and only because the sender's address is preserved: re-emitting a packet with
+# the CLIENT's source needs a raw IPv4 socket (CAP_NET_RAW), and SO_BINDTODEVICE pins each socket
+# to its leg. Granted as an AMBIENT capability to a DynamicUser — not by running as root — and the
+# bounding set holds nothing else.
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# No mount-namespace directives: in an unprivileged container they make the unit unable to
+# start at all (status=226/NAMESPACE) — see wake-endpoint.service.j2.
+
+[Install]
+WantedBy=multi-user.target

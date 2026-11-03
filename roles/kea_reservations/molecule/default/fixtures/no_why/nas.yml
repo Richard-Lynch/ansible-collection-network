@@ -1,0 +1,5 @@
+---
+subnet_id: 40
+hw_address: "02:00:5E:10:00:02"
+ip_address: "198.51.100.3"
+hostname: "nas"

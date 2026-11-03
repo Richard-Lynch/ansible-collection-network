@@ -1,0 +1,51 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_headscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_headscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Public HTTPS port traefik listens on. Also the embedded DERP's port:
+# Headscale derives the DERP port from server_url, so the two cannot differ.
+headscale_server_port__default: 443
+
+# UDP port for the embedded DERP's STUN listener.
+headscale_stun_port__default: 3478
+
+# Short code of the embedded DERP region in the DERP map.
+headscale_derp_region_code__default: headscale
+
+# Display name of the embedded DERP region, shown by `tailscale netcheck`.
+headscale_derp_region_name__default: Headscale embedded DERP
+
+# Tailnet IPv4 range. Narrow it when anything else on the hosts involved
+# already uses part of 100.64.0.0/10.
+headscale_ipv4_prefix__default: 100.64.0.0/10
+
+# Split DNS: {domain: [resolver, ...]}. Queries for these domains go to the
+# listed resolvers; everything else uses the client's own DNS.
+headscale_split_dns__default: {}
+
+# Headscale users to ensure exist. Never deletes one that is not listed —
+# deleting a user deletes every node it owns.
+headscale_users__default: []
+
+# Directory holding the compose project, config and state.
+headscale_deploy_dir__default: /opt/headscale
+
+# Headscale image. Pinned; bump deliberately.
+headscale_image__default: docker.io/headscale/headscale:0.29.5
+
+# Traefik image for TLS termination. Pinned; bump deliberately.
+headscale_traefik_image__default: docker.io/library/traefik:v3.7.15
+
+# Loopback port Headscale serves plain HTTP on, behind traefik.
+headscale_listen_port__default: 8080
+
+# Loopback metrics port. Not Headscale's 9090 default, which collides with
+# anything Prometheus-shaped on the same host.
+headscale_metrics_port__default: 9095

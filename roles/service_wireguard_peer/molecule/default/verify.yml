@@ -1,0 +1,122 @@
+---
+# Asserts the OUTPUT CONTRACT of the real role, against artifacts the real role just produced.
+#
+# HONEST COVERAGE. This scenario CANNOT test: kernel module availability, interface creation,
+# handshakes, cryptokey-routing drop behaviour, NAT keepalive, MTU blackholes, or systemd unit
+# behaviour. None of those are reproducible in a container. They are covered by the role's own
+# verify entrypoint against a real host.
+#
+# What it DOES cover is everything that regresses silently in the rendered config, plus proof that
+# every safety guard actually fires.
+- name: Verify the rendered peer configs and the guards
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _tmp: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') | default('/tmp', true) }}/wg"
+
+  tasks:
+    - name: Read the artifacts
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      register: _f
+      loop:
+        - "{{ _tmp }}/wgsite.conf"
+        - "{{ _tmp }}/wglisten.conf"
+        - "{{ _tmp }}/guards.txt"
+
+    - name: Decode
+      ansible.builtin.set_fact:
+        _site: "{{ _f.results[0].content | b64decode }}"
+        _listener: "{{ _f.results[1].content | b64decode }}"
+        _guards: "{{ _f.results[2].content | b64decode }}"
+
+    # --- the stranding-critical directives ------------------------------------------------------
+    - name: "Table is off on BOTH ends"
+      # The single most important line in the file. With Table unset, wg-quick installs routes from
+      # AllowedIPs, and a wide AllowedIPs then replaces the host's default route. Also proves the
+      # 'none' sentinel renders as wg-quick's 'off' rather than leaking through as the string
+      # 'none' or, worse, as YAML's boolean False (which is what a bare `off` default produced
+      # before it was renamed).
+      ansible.builtin.assert:
+        that:
+          - "'Table = off' in _site"
+          - "'Table = off' in _listener"
+          - "'Table = none' not in _site"
+          - "'Table = False' not in _site"
+        fail_msg: "Table is not 'off' in a rendered config — routes from AllowedIPs could hijack the default route."
+        success_msg: "Table = off on both ends."
+
+    - name: "The private key is NOT in the config"
+      # The whole point of the PostUp indirection. If a key ever appears here, generate-don't-apply
+      # starts printing secrets into transcripts and CI logs.
+      ansible.builtin.assert:
+        that:
+          - "'PrivateKey' not in _site"
+          - "'PrivateKey' not in _listener"
+          - "'private-key ' in _site"
+        fail_msg: "A PrivateKey line appeared in the rendered config — diffs would leak the secret."
+        success_msg: "No PrivateKey in the config; loaded via PostUp from its own 0600 file."
+
+    - name: "MTU is set explicitly on both ends"
+      ansible.builtin.assert:
+        that:
+          - "'MTU = 1420' in _site"
+          - "'MTU = 1420' in _listener"
+        fail_msg: "MTU missing — the default would risk an MTU blackhole on a real path."
+        success_msg: "MTU = 1420 on both ends."
+
+    # --- the two ends must differ in exactly the ways they should -------------------------------
+    - name: "Only the NAT'd initiator carries a keepalive"
+      # Without it, far-end-initiated packets fail intermittently once the NAT mapping idles out —
+      # a maddening partial failure. On the public listener it is pointless overhead.
+      ansible.builtin.assert:
+        that:
+          - "'PersistentKeepalive = 25' in _site"
+          - "'PersistentKeepalive' not in _listener"
+        fail_msg: "Keepalive is on the wrong end (or missing) — it belongs only on the NAT-ed initiator."
+        success_msg: "Keepalive on the site end only."
+
+    - name: "Only the fixed endpoint declares a ListenPort"
+      # The initiator must let its source port float; pinning it invites a collision with any
+      # other WireGuard listener behind the same NAT.
+      ansible.builtin.assert:
+        that:
+          - "'ListenPort = 51820' in _listener"
+          - "'ListenPort' not in _site"
+        fail_msg: "ListenPort is on the wrong end — the NAT-ed initiator should let its port float."
+        success_msg: "ListenPort on the listener end only."
+
+    - name: "Each end routes the OTHER end, and never itself"
+      ansible.builtin.assert:
+        that:
+          - "'AllowedIPs = 198.18.254.2/32' in _site"
+          - "'198.18.254.1/32' in _listener"
+          - "'0.0.0.0/0' not in _site"
+          - "'0.0.0.0/0' not in _listener"
+        fail_msg: "AllowedIPs are wrong — each end must route the other, never a default route."
+        success_msg: "AllowedIPs correct on both ends."
+
+    # --- the guards must FIRE ------------------------------------------------------------------
+    - name: "Every safety guard fired on its illegal input"
+      # A guard that cannot fire is worse than no guard. These four
+      # inputs are each a real way to strand a remote host, and the argspec CANNOT express any of
+      # them — OptionSpec has no range or custom validation — so these asserts are the only proof
+      # the protection exists.
+      ansible.builtin.assert:
+        that:
+          - "'defroute=FIRED' in _guards"
+          - "'mtu=FIRED' in _guards"
+          - "'key=FIRED' in _guards"
+          - "'endpoint=FIRED' in _guards"
+        fail_msg: >-
+          A safety guard did NOT fire on illegal input: {{ _guards }}
+          The role would accept a config that can strand a remote host.
+        success_msg: "All four guards fired on their illegal inputs."
+
+    - name: Clean up
+      # LAST, after every assertion — a cleanup task placed mid-file deletes the artifacts before
+      # the later checks can read them.
+      ansible.builtin.file:
+        path: "{{ _tmp }}"
+        state: absent

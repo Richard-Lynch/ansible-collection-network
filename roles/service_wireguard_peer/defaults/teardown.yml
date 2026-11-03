@@ -1,0 +1,85 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_wireguard_peer/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_wireguard_peer
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      teardown
+
+# Interface name. One per peering; wg0 unless a host holds several.
+wireguard_interface__default: wg0
+
+# UDP port to listen on. 0 means DO NOT SET ListenPort — correct for a NATed
+# initiator, which dials out and should let the port float. The fixed listener sets
+# a port (WireGuard's conventional one is 51820) because it is the endpoint peers dial.
+wireguard_listen_port__default: 0
+
+# Where the private key file lives, 0600. The key is DELIBERATELY NOT written into
+# wg0.conf: generate-don't-apply prints config diffs, and a key in the config forces a
+# choice between no_log (kills the diff) and leaking the secret into transcripts and CI.
+# The config loads it via PostUp instead, so it can diff freely forever.
+wireguard_private_key_path__default: /etc/wireguard/wg0.key
+
+# The private key VALUE, from a secret lookup of your choice. Never hardcode it.
+# Empty means the role refuses to configure rather than writing a broken peer.
+wireguard_private_key__default: ''
+
+# This end's OWN public key. Not a secret. Used as a read-back assertion: after the key
+# is installed the role compares `wg show <if> public-key` against this. That converts
+# a pubkey/privkey desync — the cross-end failure that actually happens, and which is
+# otherwise SILENT (the handshake simply never completes) — into a red assert.
+wireguard_public_key__default: ''
+
+# The far end(s). Each entry is a dict:
+#   public_key           (str, required)
+#   allowed_ips          (list of str, required) — cryptokey routing: BOTH the route
+#                        selector and the inbound source filter. A packet from this
+#                        peer whose source is not listed is DROPPED SILENTLY.
+#                        0.0.0.0/0 would hijack the default route — rejected in _guards.
+#   endpoint             (str, optional) host:port. Omit for a passive listener.
+#   persistent_keepalive (int, optional) 25 on a NAT'd initiator, 0 on a public peer.
+wireguard_peers__default: []
+
+# 1500 - 80 covers the worst common encapsulation. Too high gives an MTU BLACKHOLE:
+# handshake and ping fine, large responses silently vanish. Range enforced in _guards.
+wireguard_mtu__default: 1420
+
+# 'none' (this role's sentinel, rendered as wg-quick's 'off') means wg-quick
+# installs NO routes and the play adds only what it needs.
+# Any other value lets AllowedIPs drive the routing table, which on a remote public
+# host is one copy-paste away from replacing the default route and stranding you.
+wireguard_table__default: none
+
+# Enable IPv4 forwarding, so this peer can ROUTE traffic between the tunnel and its
+# local network rather than only terminating it.
+# Required on a peer that acts as a gateway for other hosts on its side of the link.
+# Without it the packets ARRIVE and are silently discarded: the tunnel is healthy, AllowedIPs is right, the
+# route is right, and nothing crosses. Defaults FALSE because a peer that only
+# terminates traffic should not be a router.
+wireguard_forward__default: false
+
+# Whether to install the nftables policy. FALSE by default so that 'zero firewall
+# changes on this host' is structural rather than remembered — set it true only on
+# the end whose firewall this role should own.
+wireguard_manage_nftables__default: false
+
+# Flows the FAR end may INITIATE into this side. Empty means established/related only.
+# Each entry: daddr (str), dport (int), proto (str, default tcp), comment (str).
+# Needed whenever the far end PUSHES to this side (a metrics or log shipper, say) —
+# without it the firewall would block the very traffic the link exists for.
+wireguard_inbound_allow__default: []
+
+# Generate-don't-apply. When false, reports the diff and writes nothing.
+wireguard_apply__default: false
+
+# TESTABILITY SEAM, unset in production: render config to this directory instead of
+# /etc so molecule can call the REAL role and assert on real output rather than
+# re-deriving the role's own expressions over a stub (the tautology trap).
+wireguard_render_dir__default: ''
+
+# Separate confirm var — deliberately NOT wireguard_apply. Destruction
+# should never ride on the same flag as configuration.
+wireguard_teardown_confirm__default: false

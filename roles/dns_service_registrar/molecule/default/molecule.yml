@@ -1,0 +1,33 @@
+# Offline scenario — exercises the role's REAL compute logic against stubbed zone contents.
+# No docker, no bind9: the I/O halves (AXFR, nsupdate, read-back) belong in a live test against
+# a real server and a disposable zone. What is tested here is the part that decides WHAT to write.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # Molecule runs from the scenario directory, so the repo's ansible.cfg roles_path (./roles) does
+  # not resolve. Pointed at the repo root explicitly so converge.yml can include_role the role
+  # under test — which is what makes this a real test of the role's own code rather than a
+  # re-derivation of its logic in the scenario.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # BOTH trees, mirroring ansible.cfg's `collections_path = collections.galaxy:./collections`.
+    # Every vendored collection lives in collections.galaxy/; only the repo's own my.utils lives in
+    # collections/. Required because this scenario INVOKES the role, which uses a community.*
+    # plugin, and molecule does not inherit ansible.cfg — a CI-only failure with no local signal,
+    # since a dev venv bundles the collections inside site-packages.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

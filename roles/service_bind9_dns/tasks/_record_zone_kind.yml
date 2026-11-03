@@ -1,0 +1,32 @@
+---
+# Is bind9_parent_domain a DYNAMIC zone (named.conf lets a key update it) or a STATIC one? Read from
+# the named.conf bind9 actually loads, every time: which zones are Kea-served is data that can
+# change (a zone moved between static and dynamic), so it is never assumed from the zone's name.
+#
+# The pattern brackets the braces ([{]) instead of escaping them, so no backslash has to survive
+# YAML and Jinja on its way to the regex (the yaml-jinja-escapes skill).
+
+- name: "Record — read named.conf (which zones accept dynamic updates)"
+  ansible.builtin.slurp:
+    src: "{{ bind9_config_dir }}/config/named.conf"
+  register: _rz_conf
+
+- name: "Record — find {{ bind9_parent_domain }}'s zone stanza and its allow-update"
+  vars:
+    _rz_text: "{{ _rz_conf.content | b64decode }}"
+    _rz_zone: >-
+      {{ 'zone "' ~ (bind9_parent_domain | regex_escape) ~ '" [{]' }}
+    _rz_keyed: >-
+      {{ 'zone "' ~ (bind9_parent_domain | regex_escape) ~ '" [{][^}]*?allow-update [{] *key ' }}
+  ansible.builtin.set_fact:
+    _rz_found: "{{ _rz_text is search(_rz_zone) }}"
+    _rz_dynamic: "{{ _rz_text is search(_rz_keyed) }}"
+
+- name: "Record — HARD GATE: the zone must be declared in named.conf (else its kind cannot be told)"
+  ansible.builtin.assert:
+    that: _rz_found | bool
+    fail_msg: >-
+      Zone '{{ bind9_parent_domain }}' has no stanza in {{ bind9_config_dir }}/config/named.conf, so
+      whether it is static or dynamic cannot be read. A zone file without a stanza is not served:
+      register it with add_domain/add_vlan first.
+    quiet: true

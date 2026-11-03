@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Configure a multi-homed probe guest with one interface per VLAN, and prove each leg landed on
+    the VLAN it was asked for, so layer-2 traffic such as Wake-on-LAN can be sent from the target's
+    own segment.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [networking, vlan, wakeonlan, linux]
+dependencies: []

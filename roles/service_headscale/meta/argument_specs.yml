@@ -1,0 +1,130 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_headscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_headscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Headscale control server + embedded DERP behind a TLS-terminating traefik
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      headscale_server_hostname:
+        description:
+          - Public DNS name clients use to reach the control server. Must already
+          - resolve to this host — the certificate is issued for it.
+        type: str
+        required: true
+      headscale_server_port:
+        description:
+          - "Public HTTPS port traefik listens on. Also the embedded DERP's port:"
+          - Headscale derives the DERP port from server_url, so the two cannot differ.
+        type: int
+        required: false
+        default: 443
+      headscale_public_ipv4:
+        description:
+          - Public IPv4 advertised for the embedded DERP/STUN node, so clients can
+          - reach the relay without a DNS lookup.
+        type: str
+        required: true
+      headscale_stun_port:
+        description:
+          - UDP port for the embedded DERP's STUN listener.
+        type: int
+        required: false
+        default: 3478
+      headscale_derp_region_code:
+        description:
+          - Short code of the embedded DERP region in the DERP map.
+        type: str
+        required: false
+        default: headscale
+      headscale_derp_region_name:
+        description:
+          - Display name of the embedded DERP region, shown by `tailscale netcheck`.
+        type: str
+        required: false
+        default: Headscale embedded DERP
+      headscale_ipv4_prefix:
+        description:
+          - Tailnet IPv4 range. Narrow it when anything else on the hosts involved
+          - already uses part of 100.64.0.0/10.
+        type: str
+        required: false
+        default: 100.64.0.0/10
+      headscale_base_domain:
+        description:
+          - MagicDNS domain (<node>.<base_domain>). Headscale refuses one equal to, or
+          - a parent of, the server hostname's domain.
+        type: str
+        required: true
+      headscale_split_dns:
+        description:
+          - 'Split DNS: {domain: [resolver, ...]}. Queries for these domains go to the'
+          - listed resolvers; everything else uses the client's own DNS.
+        type: dict
+        required: false
+        default: {}
+      headscale_users:
+        description:
+          - Headscale users to ensure exist. Never deletes one that is not listed —
+          - deleting a user deletes every node it owns.
+        type: list
+        required: false
+        default: []
+        elements: str
+      headscale_policy:
+        description:
+          - The tailnet policy (tagOwners, autoApprovers, grants) as data, rendered
+          - to JSON. An empty dict would mean ALLOW ALL, so the role refuses one.
+        type: dict
+        required: true
+      headscale_acme_email:
+        description:
+          - Let's Encrypt account email for traefik's DNS-01 resolver.
+        type: str
+        required: true
+      headscale_cf_dns_api_token:
+        description:
+          - Cloudflare token with DNS edit on the zone, for the DNS-01 challenge.
+          - DNS-01 because the usual HTTP-01/TLS-ALPN-01 need ports 80/443, which
+          - may belong to something else on the host.
+        type: str
+        required: true
+        no_log: true
+      headscale_deploy_dir:
+        description:
+          - Directory holding the compose project, config and state.
+        type: str
+        required: false
+        default: /opt/headscale
+      headscale_image:
+        description:
+          - Headscale image. Pinned; bump deliberately.
+        type: str
+        required: false
+        default: docker.io/headscale/headscale:0.29.5
+      headscale_traefik_image:
+        description:
+          - Traefik image for TLS termination. Pinned; bump deliberately.
+        type: str
+        required: false
+        default: docker.io/library/traefik:v3.7.15
+      headscale_listen_port:
+        description:
+          - Loopback port Headscale serves plain HTTP on, behind traefik.
+        type: int
+        required: false
+        default: 8080
+      headscale_metrics_port:
+        description:
+          - Loopback metrics port. Not Headscale's 9090 default, which collides with
+          - anything Prometheus-shaped on the same host.
+        type: int
+        required: false
+        default: 9095

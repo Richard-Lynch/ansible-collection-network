@@ -1,0 +1,175 @@
+---
+# ENTRYPOINT: expose Wake-on-LAN over HTTP from this multi-homed guest.
+#
+# WHY HERE. A magic packet is a layer-2 broadcast and cannot cross a VLAN, so it must originate on
+# the target's own segment. A guest with a leg on each segment can send a packet for ANY of them,
+# which makes it the one place worth putting an endpoint. A caller then needs no leg of its own,
+# no SSH key and no credential: a GET from a phone, a handheld or a dashboard tile.
+#
+# WHY NOT SSH. A key on a client device is an access decision — it has to be created, authorised,
+# rotated and stored — and a key that can run commands on a guest present on every segment is a
+# far larger grant than "send this one packet". With the allowlist below, the grant IS the packet:
+# a caller names a declared target and cannot specify a MAC or a broadcast address at all.
+#
+# SECURITY POSTURE, stated plainly rather than left implicit. There is NO authentication. Anyone
+# who can reach the port can list the declared targets and wake them, so bind or firewall it to
+# trusted segments. The only action offered is "power on a machine someone already declared
+# wakeable", and the allowlist is what makes that defensible — without it this would be a packet
+# injector on every segment the guest holds. If that trade is not acceptable for you, add a shared
+# secret; do not widen the allowlist model.
+#
+# IDEMPOTENT AND SAFE TO RE-RUN. Gated on config_vlan_probe_apply like the rest of the role, so a
+# default run reports and changes nothing.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Assert a wake target was declared
+  # Refuse to deploy a service that could only ever 404. The script also refuses to START with an
+  # empty allowlist, deliberately belt-and-braces: this check gives a readable failure at deploy
+  # time, and that one stops a hand-edited unit from serving a useless endpoint.
+  ansible.builtin.assert:
+    that:
+      - config_vlan_probe_wake_targets | length > 0
+    fail_msg: >-
+      config_vlan_probe_wake_targets is empty, so the endpoint would answer 404 to everything.
+      Declare targets in the probe host's inventory as {name: {mac, broadcast, port}}.
+    quiet: true
+
+- name: Assert every target names a segment this guest is actually on
+  # THE CHECK THAT MATTERS, and the one the rest of this role already exists to make: a packet
+  # broadcast to a subnet this guest holds no leg in SUCCEEDS and reaches nothing, because it is
+  # unacknowledged UDP. An endpoint with that defect reads as working forever.
+  #
+  # Compares each target's broadcast /24 against the addresses READ FROM THE GUEST above, so a
+  # mis-tagged leg cannot satisfy it. Same reasoning as the position assert in main.yml, applied
+  # to the thing being sent rather than to the legs themselves.
+  ansible.builtin.assert:
+    that:
+      - _cvp_wake_unreachable | length == 0
+    fail_msg: >-
+      These wake targets broadcast into segments this guest has NO leg in:
+      {{ _cvp_wake_unreachable | join(', ') }}.
+      The send would succeed and wake nothing. Held: {{ _probe_held | join(', ') }}.
+      Either give the guest a leg on that VLAN, or stop declaring the target here.
+    success_msg: >-
+      All {{ config_vlan_probe_wake_targets | length }} wake target(s) broadcast into a segment
+      this guest holds a leg in.
+    quiet: true
+  vars:
+    # The /24 prefixes the guest actually holds, from main.yml's read of its own interfaces.
+    # e.g. ['192.0.2', '198.51.100', ...] — derived, never declared.
+    _cvp_held_prefixes: >-
+      {{ _probe_held | map('regex_replace', '/.*$', '')
+         | map('regex_replace', '\.\d+$', '') | list }}
+    # A target is unreachable when its broadcast's /24 prefix is not one the guest holds. Built
+    # as a plain prefix-membership test rather than a regex over a joined alternation: the regex
+    # form needed its dots escaped inside a Jinja expression to mean anything, which is the
+    # YAMLESC/REGEX family of trap and silently matched too much when it was wrong.
+    #
+    # A target with no `broadcast` key at all yields '' here, which is in no prefix list, so it
+    # is reported as unreachable rather than skipped — the right answer, and one fewer branch.
+    _cvp_wake_unreachable: >-
+      {{ config_vlan_probe_wake_targets | dict2items
+         | rejectattr('value.broadcast', 'defined')
+         | map(attribute='key') | list
+         + (config_vlan_probe_wake_targets | dict2items
+            | selectattr('value.broadcast', 'defined')
+            | rejectattr('value.broadcast', 'in', _cvp_reachable_broadcasts)
+            | map(attribute='key') | list) }}
+    # Every broadcast address the guest could legitimately send to: the .255 of each /24 it
+    # holds. Comparing whole strings removes the prefix-matching ambiguity entirely.
+    _cvp_reachable_broadcasts: >-
+      {{ _cvp_held_prefixes | map('regex_replace', '$', '.255') | list }}
+
+- name: Report the endpoint plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Deploying' if (config_vlan_probe_apply | bool) else 'WOULD deploy' }}
+      the wake endpoint on port {{ config_vlan_probe_wake_port }} for
+      {{ config_vlan_probe_wake_targets.keys() | list | join(', ') }}.
+      {{ '' if (config_vlan_probe_apply | bool) else 'Re-run with config_vlan_probe_apply=true.' }}
+
+- name: Deploy the endpoint
+  when: config_vlan_probe_apply | bool
+  block:
+    - name: Install the wake endpoint script
+      ansible.builtin.copy:
+        src: wake_endpoint.py
+        dest: "{{ config_vlan_probe_wake_script }}"
+        mode: "0755"
+        owner: root
+        group: root
+      notify: Restart the wake endpoint
+
+    - name: Install the unit
+      # The allowlist is rendered INTO the unit's ExecStart, so a change to the targets changes
+      # the unit file — which is what makes the handler fire. Putting the JSON in a separate
+      # config file would need its own change detection for no benefit.
+      ansible.builtin.template:
+        src: wake-endpoint.service.j2
+        dest: "/etc/systemd/system/{{ config_vlan_probe_wake_unit }}"
+        mode: "0644"
+        owner: root
+        group: root
+      notify: Restart the wake endpoint
+
+    - name: Enable and start it
+      ansible.builtin.systemd_service:
+        name: "{{ config_vlan_probe_wake_unit }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Flush handlers so the read-back sees the new configuration
+      # Without this, the verification below runs against the OLD process when only the script or
+      # the target list changed — handlers run at play end, so a "reload if changed" read-back
+      # placed before the flush reports the pre-change state and passes for the wrong reason.
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the endpoint back
+      # GATED ON THE SERVICE'S OWN ANSWER, not on systemd reporting active: a unit can be active
+      # with a process that failed to bind, and `/healthz` returning the loaded allowlist is the
+      # only thing that proves the running process has the configuration just deployed.
+      #
+      # Retried because systemd returns from `started` before the socket is accepting.
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ config_vlan_probe_wake_port }}/healthz"
+        return_content: true
+      register: _cvp_wake_health
+      retries: 5
+      delay: 2
+      until: _cvp_wake_health is succeeded
+      changed_when: false
+
+    - name: Assert the running process loaded every declared target
+      # Compares the allowlist the PROCESS reports against what inventory declares. Catches the
+      # case the unit's own status cannot: a service that restarted with a stale command line, or
+      # a target added to inventory without the unit being re-rendered.
+      #
+      # `.json` is used only after asserting it parsed — the endpoint sets an explicit JSON
+      # content-type, but a read-back that cannot distinguish "could not parse" from "nothing is
+      # there" is a silent guard.
+      ansible.builtin.assert:
+        that:
+          - _cvp_wake_health.json is defined
+          - _cvp_wake_health.json.ok | default(false) | bool
+          - (_cvp_wake_health.json.targets | default([]) | sort)
+            == (config_vlan_probe_wake_targets.keys() | list | sort)
+        fail_msg: >-
+          The endpoint is answering but with the WRONG configuration. Declared:
+          {{ config_vlan_probe_wake_targets.keys() | list | sort | join(', ') }}; loaded:
+          {{ _cvp_wake_health.json.targets | default('(unparseable: ' ~ (_cvp_wake_health.content | default('') | truncate(120)) ~ ')') }}.
+        quiet: true
+
+    - name: Report the endpoint
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Wake endpoint live on port {{ config_vlan_probe_wake_port }}, serving
+            {{ _cvp_wake_health.json.targets | join(', ') }}.
+          - >-
+            Call it with: curl http://<this guest on the caller's VLAN>:{{ config_vlan_probe_wake_port }}/wake/<target>
+          - >-
+            A 200 means SENT, never AWAKE — the packet is unacknowledged UDP. The caller is
+            responsible for probing the target afterwards.

@@ -1,0 +1,50 @@
+---
+# GENERATED from roles/service_kea_dhcp/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate service_kea_dhcp
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — kea_option_dns_servers must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "kea_option_dns_servers | default('') | length >= 1"
+    fail_msg: "kea_option_dns_servers violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ kea_option_dns_servers | default('(unset)') }}"
+    quiet: true
+  when: kea_option_dns_servers is defined
+
+- name: "GUARD (generated) — kea_pool_offset must be >= 1; <= 250"
+  ansible.builtin.assert:
+    that:
+      - "kea_pool_offset | int >= 1"
+      - "kea_pool_offset | int <= 250"
+    fail_msg: "kea_pool_offset violates a constraint declared in meta/argument_specs.py: must be >= 1; <= 250. Got: {{ kea_pool_offset | default('(unset)') }}"
+    quiet: true
+  when: kea_pool_offset is defined
+
+- name: "GUARD (generated) — kea_rebind_timer must be >= 30"
+  ansible.builtin.assert:
+    that:
+      - "kea_rebind_timer | int >= 30"
+    fail_msg: "kea_rebind_timer violates a constraint declared in meta/argument_specs.py: must be >= 30. Got: {{ kea_rebind_timer | default('(unset)') }}"
+    quiet: true
+  when: kea_rebind_timer is defined
+
+- name: "GUARD (generated) — kea_renew_timer must be >= 30"
+  ansible.builtin.assert:
+    that:
+      - "kea_renew_timer | int >= 30"
+    fail_msg: "kea_renew_timer violates a constraint declared in meta/argument_specs.py: must be >= 30. Got: {{ kea_renew_timer | default('(unset)') }}"
+    quiet: true
+  when: kea_renew_timer is defined
+
+- name: "GUARD (generated) — kea_valid_lifetime must be >= 60"
+  ansible.builtin.assert:
+    that:
+      - "kea_valid_lifetime | int >= 60"
+    fail_msg: "kea_valid_lifetime violates a constraint declared in meta/argument_specs.py: must be >= 60. Got: {{ kea_valid_lifetime | default('(unset)') }}"
+    quiet: true
+  when: kea_valid_lifetime is defined

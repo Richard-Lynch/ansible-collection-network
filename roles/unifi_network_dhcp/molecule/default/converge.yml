@@ -1,0 +1,117 @@
+---
+# Calls the REAL role through its REAL entrypoints, with the controller stubbed by an injected
+# fixture (`unifi_network_dhcp_live_fixture`) and `unifi_network_dhcp_apply: false` so nothing is
+# PUT anywhere.
+#
+# THIS FILE DELIBERATELY CONTAINS NO COPY OF THE ROLE'S LOGIC. The previous version re-implemented
+# the merge/diff expressions here and verify.yml asserted that copy against itself — a tautology
+# that stayed green while `dhcp_relay_enabled` was entirely absent from the role's real merge, so
+# every relay request computed "NO CHANGE" and silently did nothing, leaving its callers' networks
+# with no DHCP server at all. If the role's behaviour changes, this scenario must notice; that is
+# only possible if it actually runs the role.
+- name: Converge
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _fixture: "{{ lookup('file', 'files/networkconf_fixture.json') | from_json }}"
+    # The engine reads `_unifi_live.json.data`, so the fixture is the JSON BODY.
+    unifi_network_dhcp_live_fixture: "{{ _fixture }}"
+    unifi_network_dhcp_apply: false
+    unifi_network_dhcp_api_key: "molecule-fake-key"
+
+  tasks:
+    # --- settings entrypoint -------------------------------------------------------------------
+    - name: SETTINGS — pool start plus a dhcpd_dns list (the dns_1..N mapping)
+      ansible.builtin.include_role:
+        name: unifi_network_dhcp
+        tasks_from: settings
+      vars:
+        unifi_network_dhcp_networks:
+          - { vlan: 100, dhcpd_start: "192.0.2.11" }
+          - vlan: 200
+            dhcpd_start: "198.51.100.11"
+            dhcpd_dns: ["192.0.2.2", "192.0.2.3"]
+
+    - name: Keep the settings result for verify
+      ansible.builtin.set_fact:
+        r_settings: "{{ _unifi_changes }}"
+
+    # --- relay_on entrypoint -------------------------------------------------------------------
+    - name: RELAY_ON — the flag alone
+      ansible.builtin.include_role:
+        name: unifi_network_dhcp
+        tasks_from: relay_on
+      vars:
+        _unifi_changes: []
+        unifi_network_dhcp_networks:
+          - { vlan: 100 }
+
+    - name: Keep the relay_on result for verify
+      ansible.builtin.set_fact:
+        r_relay_on: "{{ _unifi_changes }}"
+
+    # --- relay_off entrypoint ------------------------------------------------------------------
+    - name: RELAY_OFF — clearing the flag MAY carry other fields (the documented asymmetry)
+      ansible.builtin.include_role:
+        name: unifi_network_dhcp
+        tasks_from: relay_off
+      vars:
+        _unifi_changes: []
+        unifi_network_dhcp_networks:
+          - { vlan: 100, dhcpd_enabled: true }
+
+    - name: Keep the relay_off result for verify
+      ansible.builtin.set_fact:
+        r_relay_off: "{{ _unifi_changes }}"
+
+    # --- the illegal shape, which must be REFUSED ----------------------------------------------
+    - name: RELAY_ON with a co-travelling field must FAIL
+      # The relay-flag-dropped bug, as a test. block/rescue rather than ignore_errors so a PASS
+      # requires the assert to have actually fired.
+      block:
+        - name: Attempt the illegal request
+          ansible.builtin.include_role:
+            name: unifi_network_dhcp
+            tasks_from: relay_on
+          vars:
+            _unifi_changes: []
+            unifi_network_dhcp_networks:
+              - { vlan: 100, dhcp_relay_servers: ["192.0.2.2"] }
+        - name: Record that it was WRONGLY accepted
+          ansible.builtin.set_fact:
+            r_illegal_refused: false
+      rescue:
+        - name: Record that it was correctly refused
+          ansible.builtin.set_fact:
+            r_illegal_refused: true
+
+    - name: SETTINGS with the relay flag must FAIL
+      block:
+        - name: Attempt the illegal request
+          ansible.builtin.include_role:
+            name: unifi_network_dhcp
+            tasks_from: settings
+          vars:
+            _unifi_changes: []
+            unifi_network_dhcp_networks:
+              - { vlan: 100, dhcp_relay_enabled: true }
+        - name: Record that it was WRONGLY accepted
+          ansible.builtin.set_fact:
+            r_flag_in_settings_refused: false
+      rescue:
+        - name: Record that it was correctly refused
+          ansible.builtin.set_fact:
+            r_flag_in_settings_refused: true
+
+    # --- persist for verify --------------------------------------------------------------------
+    # molecule runs verify.yml as a SEPARATE play, so converge's facts do not carry over. Writing
+    # the role's actual OUTPUT to disk is what lets verify assert against what the role produced
+    # rather than re-deriving it.
+    - name: Persist the role's results for the verify play
+      ansible.builtin.copy:
+        content: "{{ {'settings': r_settings, 'relay_on': r_relay_on, 'relay_off': r_relay_off,
+                      'illegal_refused': r_illegal_refused,
+                      'flag_in_settings_refused': r_flag_in_settings_refused} | to_nice_json }}\n"
+        dest: "/tmp/molecule_unifi_network_dhcp_results.json"
+        mode: "0644"

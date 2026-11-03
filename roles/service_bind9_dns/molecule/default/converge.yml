@@ -1,0 +1,224 @@
+# Render the bind9 templates directly (like the other roles' molecule scenarios) and assert output is
+# coherent. Full task-flow (add_domain/add_vlan) + named-checkconf is validated live during use.
+---
+- name: Converge — render + assert bind9 templates
+  hosts: localhost
+  gather_facts: false
+  vars:
+    render_dir: /tmp/molecule-bind9
+    bind9_service_name: bind9
+    bind9_config_dir: /opt/bind9
+    bind9_image: "ubuntu/bind9:9.20-26.04_stable"
+    bind9_forward_ip: "192.0.2.3"
+    bind9_forward_port: 5053
+    bind9_recursion: true
+    bind9_allow_query: "any"
+    bind9_allow_transfer: "198.18.0.0/15; 198.19.0.0/16;"
+    bind9_querylog: true
+    ddns_tsig_key_name: "dhcp-key"
+    ddns_tsig_key_algorithm: "hmac-sha256"
+    ddns_tsig_key_secret: "molecule-fake-not-a-real-tsig-key"
+    bind9_zones_owner_uid: 100
+    bind9_zones_owner_gid: 101
+  tasks:
+    - name: Ensure render dir
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render named.conf skeleton
+      ansible.builtin.template:
+        src: "../../templates/named.conf.j2"
+        dest: "{{ render_dir }}/named.conf"
+        mode: "0644"
+
+    - name: Render named.conf.options — recursion ON (forward-only)
+      ansible.builtin.template:
+        src: "../../templates/named.conf.options.j2"
+        dest: "{{ render_dir }}/named.conf.options"
+        mode: "0644"
+
+    - name: Render named.conf.options again — recursion OFF (authoritative-only)
+      ansible.builtin.template:
+        src: "../../templates/named.conf.options.j2"
+        dest: "{{ render_dir }}/named.conf.options.authoritative"
+        mode: "0644"
+      vars:
+        bind9_recursion: false
+
+    - name: Render named.conf.options — recursion ON with an explicit forwarder LIST
+      ansible.builtin.template:
+        src: "../../templates/named.conf.options.j2"
+        dest: "{{ render_dir }}/named.conf.options.forwarders"
+        mode: "0644"
+      vars:
+        bind9_forwarders: ["8.8.8.8", "8.8.4.4"]
+
+    - name: Render docker-compose (no bind_ip — port 53 on all addresses)
+      ansible.builtin.template:
+        src: "../../templates/docker-compose.yml.j2"
+        dest: "{{ render_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Render docker-compose again — explicit bind_ip (one host address only)
+      ansible.builtin.template:
+        src: "../../templates/docker-compose.yml.j2"
+        dest: "{{ render_dir }}/docker-compose.bindip.yml"
+        mode: "0644"
+      vars:
+        bind9_dns_service_bind_ip: "192.0.2.3"
+        bind9_dns_service_port: 53
+
+    - name: Read back renders
+      ansible.builtin.slurp:
+        src: "{{ render_dir }}/{{ item }}"
+      register: _r
+      loop:
+        - named.conf
+        - named.conf.options
+        - named.conf.options.authoritative
+        - docker-compose.yml
+        - docker-compose.bindip.yml
+        - named.conf.options.forwarders
+
+    - name: Assert renders are coherent
+      ansible.builtin.assert:
+        that:
+          - "'include \"/etc/bind/named.conf.options\"' in (_r.results[0].content | b64decode)"
+          - "'// --- STATIC ---' in (_r.results[0].content | b64decode)"
+          - "'// --- DYNAMIC (VLANS) ---' in (_r.results[0].content | b64decode)"
+          - "'forward only' in (_r.results[1].content | b64decode)"
+          - "'192.0.2.3 port 5053' in (_r.results[1].content | b64decode)"
+          - "'recursion yes' in (_r.results[1].content | b64decode)"
+          # recursion-off render must NOT carry forward only/forwarders at all — a stray forwarders
+          # block on an authoritative-only server would be silently ignored, not a hard error, so this
+          # has to be asserted rather than left to fail loudly on its own.
+          - "'recursion no' in (_r.results[2].content | b64decode)"
+          - "'forward only' not in (_r.results[2].content | b64decode)"
+          - "'forwarders' not in (_r.results[2].content | b64decode)"
+          - "'ubuntu/bind9:9.20-26.04_stable' in (_r.results[3].content | b64decode)"
+          - "'\"53:53/tcp\"' in (_r.results[3].content | b64decode)"
+          # bind_ip compose: explicit HostIp on that one address, and named.conf.options
+          # must be mounted (it is what makes bind9_recursion changes take effect on redeploy)
+          - "'\"192.0.2.3:53:53/tcp\"' in (_r.results[4].content | b64decode)"
+          - "'\"192.0.2.3:53:53/udp\"' in (_r.results[4].content | b64decode)"
+          - "'named.conf.options:/etc/bind/named.conf.options' in (_r.results[4].content | b64decode)"
+          # The forwarder LIST replaces the single pair entirely — a leftover :5053 line would send
+          # every recursive query to a port nothing may be listening on.
+          - "'8.8.8.8;' in (_r.results[5].content | b64decode)"
+          - "'8.8.4.4;' in (_r.results[5].content | b64decode)"
+          - "'5053' not in (_r.results[5].content | b64decode)"
+          - "'recursion yes' in (_r.results[5].content | b64decode)"
+          # allow-recursion only with recursion on (named-checkconf warns otherwise)
+          - "'allow-recursion' in (_r.results[1].content | b64decode)"
+          - "'allow-recursion' not in (_r.results[2].content | b64decode)"
+        fail_msg: "bind9 template render is not coherent"
+        success_msg: >-
+          bind9 render OK: forward-only→pihole (recursion on), recursion-off has no forwarders,
+          managed-block anchors, pinned image, port 53, explicit bind_ip.
+
+# ---- the record task interface against the real bind9 from prepare.yml -------------------------
+# Run TWICE by molecule (converge, then idempotence: the second run must be changed=0, the defect:
+# blockinfile into a journaled zone re-inserted the same block and restarted bind9 every run).
+- name: Converge — records into a static zone (managed) and a dynamic zone (not written)
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - records_vars.yml
+  vars:
+    bind9_config_dir: "{{ rec_dir }}"
+    bind9_dns_service_bind_ip: 127.0.0.1
+    bind9_dns_service_port: "{{ rec_port }}"
+  tasks:
+    - name: Static zone — present A (blockinfile, as before)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: static.test
+        bind9_sub_domain: host1
+        bind9_ip: 198.18.0.1
+
+    - name: Static zone — present CNAME
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_cname_to_domain
+      vars:
+        bind9_parent_domain: static.test
+        bind9_sub_domain: web
+        bind9_domain: host1.static.test
+
+    - name: Static zone — absent A that was never there (no change)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: static.test
+        bind9_sub_domain: never
+        bind9_ip: 198.18.0.2
+        bind9_state: absent
+
+    - name: Dynamic zone — present A that bind9 serves (not written; the read-only gate passes)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: dyn.test
+        bind9_sub_domain: kea-owned
+        bind9_ip: 198.18.0.50
+
+    - name: Dynamic zone — absent A, NOT an exception (not removed; the name is Kea's)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: dyn.test
+        bind9_sub_domain: kea-owned
+        bind9_ip: 198.18.0.50
+        bind9_state: absent
+
+    - name: Dynamic zone — present A, infrastructure exception (added over RFC 2136)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: dyn.test
+        bind9_sub_domain: pve1
+        bind9_ip: 198.18.0.7
+        bind9_record_infra_exception: true
+
+    - name: Dynamic zone — absent A, infrastructure exception (the seeded name is deleted over RFC 2136)
+      ansible.builtin.include_role:
+        name: service_bind9_dns
+        tasks_from: add_host_to_domain
+      vars:
+        bind9_parent_domain: dyn.test
+        bind9_sub_domain: old-infra
+        bind9_ip: 198.18.0.99
+        bind9_state: absent
+        bind9_record_infra_exception: true
+
+    - name: Dynamic zone — present A that bind9 does NOT serve must FAIL the gate, not pass in silence
+      block:
+        - name: Try it
+          ansible.builtin.include_role:
+            name: service_bind9_dns
+            tasks_from: add_host_to_domain
+          vars:
+            bind9_parent_domain: dyn.test
+            bind9_sub_domain: missing
+            bind9_ip: 198.18.0.77
+        - name: It passed
+          ansible.builtin.set_fact:
+            rec_missing_failed: false
+      rescue:
+        - name: It failed, and said why
+          ansible.builtin.set_fact:
+            rec_missing_failed: "{{ 'does NOT resolve to its declared 198.18.0.77' in (ansible_failed_result.msg | default('')) }}"
+
+    - name: HARD GATE — the unserved name in a dynamic zone failed the read-only gate, naming it
+      ansible.builtin.assert:
+        that: rec_missing_failed | bool
+        fail_msg: "a declared record missing from a dynamic zone did NOT fail the gate (or not with the reason)"
+        quiet: true

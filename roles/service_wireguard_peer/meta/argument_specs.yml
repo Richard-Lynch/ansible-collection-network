@@ -1,0 +1,415 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_wireguard_peer/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_wireguard_peer
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Configure one end of a WireGuard site-to-site link
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      wireguard_interface:
+        description:
+          - Interface name. One per peering; wg0 unless a host holds several.
+        type: str
+        required: false
+        default: wg0
+      wireguard_address:
+        description:
+          - This end's address on the tunnel, WITH prefix, e.g. 198.18.254.1/30.
+          - Pick a small transfer subnet that is disjoint from every network either end
+          - already routes, so the tunnel never shadows a real route.
+        type: str
+        required: true
+      wireguard_listen_port:
+        description:
+          - UDP port to listen on. 0 means DO NOT SET ListenPort — correct for a NATed
+          - initiator, which dials out and should let the port float. The fixed listener sets
+          - a port (WireGuard's conventional one is 51820) because it is the endpoint peers dial.
+        type: int
+        required: false
+        default: 0
+      wireguard_private_key_path:
+        description:
+          - Where the private key file lives, 0600. The key is DELIBERATELY NOT written into
+          - "wg0.conf: generate-don't-apply prints config diffs, and a key in the config forces a"
+          - choice between no_log (kills the diff) and leaking the secret into transcripts and CI.
+          - The config loads it via PostUp instead, so it can diff freely forever.
+        type: str
+        required: false
+        default: /etc/wireguard/wg0.key
+      wireguard_private_key:
+        description:
+          - The private key VALUE, from a secret lookup of your choice. Never hardcode it.
+          - Empty means the role refuses to configure rather than writing a broken peer.
+        type: str
+        required: false
+        default: ''
+        no_log: true
+      wireguard_public_key:
+        description:
+          - "This end's OWN public key. Not a secret. Used as a read-back assertion: after the key"
+          - is installed the role compares `wg show <if> public-key` against this. That converts
+          - a pubkey/privkey desync — the cross-end failure that actually happens, and which is
+          - otherwise SILENT (the handshake simply never completes) — into a red assert.
+        type: str
+        required: false
+        default: ''
+      wireguard_peers:
+        description:
+          - 'The far end(s). Each entry is a dict:'
+          - '  public_key           (str, required)'
+          - '  allowed_ips          (list of str, required) — cryptokey routing: BOTH the route'
+          - '                       selector and the inbound source filter. A packet from this'
+          - '                       peer whose source is not listed is DROPPED SILENTLY.'
+          - '                       0.0.0.0/0 would hijack the default route — rejected in _guards.'
+          - '  endpoint             (str, optional) host:port. Omit for a passive listener.'
+          - "  persistent_keepalive (int, optional) 25 on a NAT'd initiator, 0 on a public peer."
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_mtu:
+        description:
+          - '1500 - 80 covers the worst common encapsulation. Too high gives an MTU BLACKHOLE:'
+          - handshake and ping fine, large responses silently vanish. Range enforced in _guards.
+        type: int
+        required: false
+        default: 1420
+      wireguard_table:
+        description:
+          - "'none' (this role's sentinel, rendered as wg-quick's 'off') means wg-quick"
+          - installs NO routes and the play adds only what it needs.
+          - Any other value lets AllowedIPs drive the routing table, which on a remote public
+          - host is one copy-paste away from replacing the default route and stranding you.
+        type: str
+        required: false
+        default: none
+        choices:
+          - none
+          - auto
+      wireguard_forward:
+        description:
+          - Enable IPv4 forwarding, so this peer can ROUTE traffic between the tunnel and its
+          - local network rather than only terminating it.
+          - ''
+          - Required on a peer that acts as a gateway for other hosts on its side of the link.
+          - 'Without it the packets ARRIVE and are silently discarded: the tunnel is healthy, AllowedIPs is right, the'
+          - route is right, and nothing crosses. Defaults FALSE because a peer that only
+          - terminates traffic should not be a router.
+        type: bool
+        required: false
+        default: false
+      wireguard_manage_nftables:
+        description:
+          - Whether to install the nftables policy. FALSE by default so that 'zero firewall
+          - changes on this host' is structural rather than remembered — set it true only on
+          - the end whose firewall this role should own.
+        type: bool
+        required: false
+        default: false
+      wireguard_inbound_allow:
+        description:
+          - Flows the FAR end may INITIATE into this side. Empty means established/related only.
+          - 'Each entry: daddr (str), dport (int), proto (str, default tcp), comment (str).'
+          - Needed whenever the far end PUSHES to this side (a metrics or log shipper, say) —
+          - without it the firewall would block the very traffic the link exists for.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_apply:
+        description:
+          - Generate-don't-apply. When false, reports the diff and writes nothing.
+        type: bool
+        required: false
+        default: false
+      wireguard_render_dir:
+        description:
+          - 'TESTABILITY SEAM, unset in production: render config to this directory instead of'
+          - /etc so molecule can call the REAL role and assert on real output rather than
+          - re-deriving the role's own expressions over a stub (the tautology trap).
+        type: str
+        required: false
+        default: ''
+  verify:
+    short_description: Read-only checks on a configured WireGuard peer
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      wireguard_interface:
+        description:
+          - Interface name. One per peering; wg0 unless a host holds several.
+        type: str
+        required: false
+        default: wg0
+      wireguard_address:
+        description:
+          - This end's address on the tunnel, WITH prefix, e.g. 198.18.254.1/30.
+          - Pick a small transfer subnet that is disjoint from every network either end
+          - already routes, so the tunnel never shadows a real route.
+        type: str
+        required: true
+      wireguard_listen_port:
+        description:
+          - UDP port to listen on. 0 means DO NOT SET ListenPort — correct for a NATed
+          - initiator, which dials out and should let the port float. The fixed listener sets
+          - a port (WireGuard's conventional one is 51820) because it is the endpoint peers dial.
+        type: int
+        required: false
+        default: 0
+      wireguard_private_key_path:
+        description:
+          - Where the private key file lives, 0600. The key is DELIBERATELY NOT written into
+          - "wg0.conf: generate-don't-apply prints config diffs, and a key in the config forces a"
+          - choice between no_log (kills the diff) and leaking the secret into transcripts and CI.
+          - The config loads it via PostUp instead, so it can diff freely forever.
+        type: str
+        required: false
+        default: /etc/wireguard/wg0.key
+      wireguard_private_key:
+        description:
+          - The private key VALUE, from a secret lookup of your choice. Never hardcode it.
+          - Empty means the role refuses to configure rather than writing a broken peer.
+        type: str
+        required: false
+        default: ''
+        no_log: true
+      wireguard_public_key:
+        description:
+          - "This end's OWN public key. Not a secret. Used as a read-back assertion: after the key"
+          - is installed the role compares `wg show <if> public-key` against this. That converts
+          - a pubkey/privkey desync — the cross-end failure that actually happens, and which is
+          - otherwise SILENT (the handshake simply never completes) — into a red assert.
+        type: str
+        required: false
+        default: ''
+      wireguard_peers:
+        description:
+          - 'The far end(s). Each entry is a dict:'
+          - '  public_key           (str, required)'
+          - '  allowed_ips          (list of str, required) — cryptokey routing: BOTH the route'
+          - '                       selector and the inbound source filter. A packet from this'
+          - '                       peer whose source is not listed is DROPPED SILENTLY.'
+          - '                       0.0.0.0/0 would hijack the default route — rejected in _guards.'
+          - '  endpoint             (str, optional) host:port. Omit for a passive listener.'
+          - "  persistent_keepalive (int, optional) 25 on a NAT'd initiator, 0 on a public peer."
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_mtu:
+        description:
+          - '1500 - 80 covers the worst common encapsulation. Too high gives an MTU BLACKHOLE:'
+          - handshake and ping fine, large responses silently vanish. Range enforced in _guards.
+        type: int
+        required: false
+        default: 1420
+      wireguard_table:
+        description:
+          - "'none' (this role's sentinel, rendered as wg-quick's 'off') means wg-quick"
+          - installs NO routes and the play adds only what it needs.
+          - Any other value lets AllowedIPs drive the routing table, which on a remote public
+          - host is one copy-paste away from replacing the default route and stranding you.
+        type: str
+        required: false
+        default: none
+        choices:
+          - none
+          - auto
+      wireguard_forward:
+        description:
+          - Enable IPv4 forwarding, so this peer can ROUTE traffic between the tunnel and its
+          - local network rather than only terminating it.
+          - ''
+          - Required on a peer that acts as a gateway for other hosts on its side of the link.
+          - 'Without it the packets ARRIVE and are silently discarded: the tunnel is healthy, AllowedIPs is right, the'
+          - route is right, and nothing crosses. Defaults FALSE because a peer that only
+          - terminates traffic should not be a router.
+        type: bool
+        required: false
+        default: false
+      wireguard_manage_nftables:
+        description:
+          - Whether to install the nftables policy. FALSE by default so that 'zero firewall
+          - changes on this host' is structural rather than remembered — set it true only on
+          - the end whose firewall this role should own.
+        type: bool
+        required: false
+        default: false
+      wireguard_inbound_allow:
+        description:
+          - Flows the FAR end may INITIATE into this side. Empty means established/related only.
+          - 'Each entry: daddr (str), dport (int), proto (str, default tcp), comment (str).'
+          - Needed whenever the far end PUSHES to this side (a metrics or log shipper, say) —
+          - without it the firewall would block the very traffic the link exists for.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_apply:
+        description:
+          - Generate-don't-apply. When false, reports the diff and writes nothing.
+        type: bool
+        required: false
+        default: false
+      wireguard_render_dir:
+        description:
+          - 'TESTABILITY SEAM, unset in production: render config to this directory instead of'
+          - /etc so molecule can call the REAL role and assert on real output rather than
+          - re-deriving the role's own expressions over a stub (the tautology trap).
+        type: str
+        required: false
+        default: ''
+      wireguard_verify_transport:
+        description:
+          - When false, LOCAL checks only (interface exists, pubkey matches, unit active,
+          - default route unchanged) — these must pass with the far end ABSENT, which
+          - is exactly the state after configuring one side.
+          - When true, also assert handshake age and an rx counter delta. Only meaningful
+          - once both ends exist. The knob exists so nobody reaches for
+          - failed_when:false when a one-sided verify legitimately cannot handshake.
+        type: bool
+        required: false
+        default: false
+  teardown:
+    short_description: Remove a WireGuard peer configuration
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      wireguard_interface:
+        description:
+          - Interface name. One per peering; wg0 unless a host holds several.
+        type: str
+        required: false
+        default: wg0
+      wireguard_address:
+        description:
+          - This end's address on the tunnel, WITH prefix, e.g. 198.18.254.1/30.
+          - Pick a small transfer subnet that is disjoint from every network either end
+          - already routes, so the tunnel never shadows a real route.
+        type: str
+        required: true
+      wireguard_listen_port:
+        description:
+          - UDP port to listen on. 0 means DO NOT SET ListenPort — correct for a NATed
+          - initiator, which dials out and should let the port float. The fixed listener sets
+          - a port (WireGuard's conventional one is 51820) because it is the endpoint peers dial.
+        type: int
+        required: false
+        default: 0
+      wireguard_private_key_path:
+        description:
+          - Where the private key file lives, 0600. The key is DELIBERATELY NOT written into
+          - "wg0.conf: generate-don't-apply prints config diffs, and a key in the config forces a"
+          - choice between no_log (kills the diff) and leaking the secret into transcripts and CI.
+          - The config loads it via PostUp instead, so it can diff freely forever.
+        type: str
+        required: false
+        default: /etc/wireguard/wg0.key
+      wireguard_private_key:
+        description:
+          - The private key VALUE, from a secret lookup of your choice. Never hardcode it.
+          - Empty means the role refuses to configure rather than writing a broken peer.
+        type: str
+        required: false
+        default: ''
+        no_log: true
+      wireguard_public_key:
+        description:
+          - "This end's OWN public key. Not a secret. Used as a read-back assertion: after the key"
+          - is installed the role compares `wg show <if> public-key` against this. That converts
+          - a pubkey/privkey desync — the cross-end failure that actually happens, and which is
+          - otherwise SILENT (the handshake simply never completes) — into a red assert.
+        type: str
+        required: false
+        default: ''
+      wireguard_peers:
+        description:
+          - 'The far end(s). Each entry is a dict:'
+          - '  public_key           (str, required)'
+          - '  allowed_ips          (list of str, required) — cryptokey routing: BOTH the route'
+          - '                       selector and the inbound source filter. A packet from this'
+          - '                       peer whose source is not listed is DROPPED SILENTLY.'
+          - '                       0.0.0.0/0 would hijack the default route — rejected in _guards.'
+          - '  endpoint             (str, optional) host:port. Omit for a passive listener.'
+          - "  persistent_keepalive (int, optional) 25 on a NAT'd initiator, 0 on a public peer."
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_mtu:
+        description:
+          - '1500 - 80 covers the worst common encapsulation. Too high gives an MTU BLACKHOLE:'
+          - handshake and ping fine, large responses silently vanish. Range enforced in _guards.
+        type: int
+        required: false
+        default: 1420
+      wireguard_table:
+        description:
+          - "'none' (this role's sentinel, rendered as wg-quick's 'off') means wg-quick"
+          - installs NO routes and the play adds only what it needs.
+          - Any other value lets AllowedIPs drive the routing table, which on a remote public
+          - host is one copy-paste away from replacing the default route and stranding you.
+        type: str
+        required: false
+        default: none
+        choices:
+          - none
+          - auto
+      wireguard_forward:
+        description:
+          - Enable IPv4 forwarding, so this peer can ROUTE traffic between the tunnel and its
+          - local network rather than only terminating it.
+          - ''
+          - Required on a peer that acts as a gateway for other hosts on its side of the link.
+          - 'Without it the packets ARRIVE and are silently discarded: the tunnel is healthy, AllowedIPs is right, the'
+          - route is right, and nothing crosses. Defaults FALSE because a peer that only
+          - terminates traffic should not be a router.
+        type: bool
+        required: false
+        default: false
+      wireguard_manage_nftables:
+        description:
+          - Whether to install the nftables policy. FALSE by default so that 'zero firewall
+          - changes on this host' is structural rather than remembered — set it true only on
+          - the end whose firewall this role should own.
+        type: bool
+        required: false
+        default: false
+      wireguard_inbound_allow:
+        description:
+          - Flows the FAR end may INITIATE into this side. Empty means established/related only.
+          - 'Each entry: daddr (str), dport (int), proto (str, default tcp), comment (str).'
+          - Needed whenever the far end PUSHES to this side (a metrics or log shipper, say) —
+          - without it the firewall would block the very traffic the link exists for.
+        type: list
+        required: false
+        default: []
+        elements: dict
+      wireguard_apply:
+        description:
+          - Generate-don't-apply. When false, reports the diff and writes nothing.
+        type: bool
+        required: false
+        default: false
+      wireguard_render_dir:
+        description:
+          - 'TESTABILITY SEAM, unset in production: render config to this directory instead of'
+          - /etc so molecule can call the REAL role and assert on real output rather than
+          - re-deriving the role's own expressions over a stub (the tautology trap).
+        type: str
+        required: false
+        default: ''
+      wireguard_teardown_confirm:
+        description:
+          - Separate confirm var — deliberately NOT wireguard_apply. Destruction
+          - should never ride on the same flag as configuration.
+        type: bool
+        required: false
+        default: false

@@ -1,0 +1,49 @@
+---
+# GENERATED from roles/service_headscale/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate service_headscale
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — headscale_acme_email must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "headscale_acme_email | default('') | length >= 1"
+    fail_msg: "headscale_acme_email violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ headscale_acme_email | default('(unset)') }}"
+    quiet: true
+  when: headscale_acme_email is defined
+
+- name: "GUARD (generated) — headscale_base_domain must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "headscale_base_domain | default('') | length >= 1"
+    fail_msg: "headscale_base_domain violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ headscale_base_domain | default('(unset)') }}"
+    quiet: true
+  when: headscale_base_domain is defined
+
+- name: "GUARD (generated) — headscale_cf_dns_api_token must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "headscale_cf_dns_api_token | default('') | length >= 1"
+    fail_msg: "headscale_cf_dns_api_token violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: (value suppressed — no_log)"
+    quiet: true
+  when: headscale_cf_dns_api_token is defined
+
+- name: "GUARD (generated) — headscale_public_ipv4 must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "headscale_public_ipv4 | default('') | length >= 1"
+    fail_msg: "headscale_public_ipv4 violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ headscale_public_ipv4 | default('(unset)') }}"
+    quiet: true
+  when: headscale_public_ipv4 is defined
+
+- name: "GUARD (generated) — headscale_server_hostname must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "headscale_server_hostname | default('') | length >= 1"
+    fail_msg: "headscale_server_hostname violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ headscale_server_hostname | default('(unset)') }}"
+    quiet: true
+  when: headscale_server_hostname is defined

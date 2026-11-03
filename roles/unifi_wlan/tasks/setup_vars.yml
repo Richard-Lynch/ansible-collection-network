@@ -1,0 +1,15 @@
+---
+# Bridge the generated `<name>__default` variables onto the names the tasks use (house convention;
+# defaults/main.yml is GENERATED from meta/argument_specs.py and carries the suffix).
+- name: Setup vars — resolve defaults
+  ansible.builtin.set_fact:
+    unifi_wlan_hidden: "{{ unifi_wlan_hidden | default(unifi_wlan_hidden__default) }}"
+    unifi_wlan_enabled: "{{ unifi_wlan_enabled | default(unifi_wlan_enabled__default) }}"
+    unifi_wlan_security: "{{ unifi_wlan_security | default(unifi_wlan_security__default) }}"
+    unifi_wlan_wpa_mode: "{{ unifi_wlan_wpa_mode | default(unifi_wlan_wpa_mode__default) }}"
+    unifi_wlan_wpa3_support: "{{ unifi_wlan_wpa3_support | default(unifi_wlan_wpa3_support__default) }}"
+    unifi_wlan_wpa3_transition: "{{ unifi_wlan_wpa3_transition | default(unifi_wlan_wpa3_transition__default) }}"
+    unifi_wlan_pmf_mode: "{{ unifi_wlan_pmf_mode | default(unifi_wlan_pmf_mode__default) }}"
+    unifi_wlan_apply: "{{ unifi_wlan_apply | default(unifi_wlan_apply__default) }}"
+    unifi_wlan_site: "{{ unifi_wlan_site | default(unifi_wlan_site__default) }}"
+    unifi_wlan_validate_certs: "{{ unifi_wlan_validate_certs | default(unifi_wlan_validate_certs__default) }}"

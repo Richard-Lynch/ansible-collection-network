@@ -1,0 +1,61 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/service_headscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_headscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    headscale_server_port: "{{ headscale_server_port | default(headscale_server_port__default) if headscale_server_port__default is defined else headscale_server_port | default(omit) }}"
+    headscale_stun_port: "{{ headscale_stun_port | default(headscale_stun_port__default) if headscale_stun_port__default is defined else headscale_stun_port | default(omit) }}"
+    headscale_derp_region_code: "{{ headscale_derp_region_code | default(headscale_derp_region_code__default) if headscale_derp_region_code__default is defined else headscale_derp_region_code | default(omit) }}"
+    headscale_derp_region_name: "{{ headscale_derp_region_name | default(headscale_derp_region_name__default) if headscale_derp_region_name__default is defined else headscale_derp_region_name | default(omit) }}"
+    headscale_ipv4_prefix: "{{ headscale_ipv4_prefix | default(headscale_ipv4_prefix__default) if headscale_ipv4_prefix__default is defined else headscale_ipv4_prefix | default(omit) }}"
+    headscale_split_dns: "{{ headscale_split_dns | default(headscale_split_dns__default) if headscale_split_dns__default is defined else headscale_split_dns | default(omit) }}"
+    headscale_users: "{{ headscale_users | default(headscale_users__default) if headscale_users__default is defined else headscale_users | default(omit) }}"
+    headscale_deploy_dir: "{{ headscale_deploy_dir | default(headscale_deploy_dir__default) if headscale_deploy_dir__default is defined else headscale_deploy_dir | default(omit) }}"
+    headscale_image: "{{ headscale_image | default(headscale_image__default) if headscale_image__default is defined else headscale_image | default(omit) }}"
+    headscale_traefik_image: "{{ headscale_traefik_image | default(headscale_traefik_image__default) if headscale_traefik_image__default is defined else headscale_traefik_image | default(omit) }}"
+    headscale_listen_port: "{{ headscale_listen_port | default(headscale_listen_port__default) if headscale_listen_port__default is defined else headscale_listen_port | default(omit) }}"
+    headscale_metrics_port: "{{ headscale_metrics_port | default(headscale_metrics_port__default) if headscale_metrics_port__default is defined else headscale_metrics_port | default(omit) }}"
+  when: not (_service_headscale__argspec_resolved | default(false))
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    headscale_server_port: "{{ headscale_server_port__default if headscale_server_port__default is defined else headscale_server_port | default(omit) }}"
+    headscale_stun_port: "{{ headscale_stun_port__default if headscale_stun_port__default is defined else headscale_stun_port | default(omit) }}"
+    headscale_derp_region_code: "{{ headscale_derp_region_code__default if headscale_derp_region_code__default is defined else headscale_derp_region_code | default(omit) }}"
+    headscale_derp_region_name: "{{ headscale_derp_region_name__default if headscale_derp_region_name__default is defined else headscale_derp_region_name | default(omit) }}"
+    headscale_ipv4_prefix: "{{ headscale_ipv4_prefix__default if headscale_ipv4_prefix__default is defined else headscale_ipv4_prefix | default(omit) }}"
+    headscale_split_dns: "{{ headscale_split_dns__default if headscale_split_dns__default is defined else headscale_split_dns | default(omit) }}"
+    headscale_users: "{{ headscale_users__default if headscale_users__default is defined else headscale_users | default(omit) }}"
+    headscale_deploy_dir: "{{ headscale_deploy_dir__default if headscale_deploy_dir__default is defined else headscale_deploy_dir | default(omit) }}"
+    headscale_image: "{{ headscale_image__default if headscale_image__default is defined else headscale_image | default(omit) }}"
+    headscale_traefik_image: "{{ headscale_traefik_image__default if headscale_traefik_image__default is defined else headscale_traefik_image | default(omit) }}"
+    headscale_listen_port: "{{ headscale_listen_port__default if headscale_listen_port__default is defined else headscale_listen_port | default(omit) }}"
+    headscale_metrics_port: "{{ headscale_metrics_port__default if headscale_metrics_port__default is defined else headscale_metrics_port | default(omit) }}"
+  when: _service_headscale__argspec_resolved | default(false)
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _service_headscale__argspec_resolved: true

@@ -1,0 +1,58 @@
+---
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Assertions ran in converge
+      ansible.builtin.debug:
+        msg: "bind9 config render verified in converge."
+
+- name: Verify — what the real bind9 serves after converge AND the idempotence run
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - records_vars.yml
+  tasks:
+    - name: Ask bind9
+      ansible.builtin.command:
+        argv: [dig, -p, "{{ rec_port }}", "@127.0.0.1", "{{ item.name }}", "{{ item.type }}", +short, +time=2, +tries=2]
+      loop:
+        - {name: host1.static.test, type: A, want: "198.18.0.1"}
+        - {name: web.static.test, type: CNAME, want: "host1.static.test."}
+        - {name: never.static.test, type: A, want: ""}
+        - {name: kea-owned.dyn.test, type: A, want: "198.18.0.50"}
+        - {name: old-infra.dyn.test, type: A, want: ""}
+        - {name: pve1.dyn.test, type: A, want: "198.18.0.7"}
+        - {name: missing.dyn.test, type: A, want: ""}
+      loop_control:
+        label: "{{ item.name }} {{ item.type }}"
+      register: _ask
+      changed_when: false
+
+    - name: Each name serves exactly what it should (the dynamic zone untouched by the role)
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+          - (item.stdout | trim) == item.item.want
+        fail_msg: "{{ item.item.name }} {{ item.item.type }}: served '{{ item.stdout | trim }}', want '{{ item.item.want }}'"
+        quiet: true
+      loop: "{{ _ask.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Read the dynamic zone's FILE (the role must never have edited it)
+      ansible.builtin.slurp:
+        src: "{{ rec_dir }}/zones/dyn.test.zone"
+      register: _dynfile
+
+    - name: Read the static zone's file (the blockinfile path still writes it)
+      ansible.builtin.slurp:
+        src: "{{ rec_dir }}/zones/static.test.zone"
+      register: _statfile
+
+    - name: The dynamic file carries no ANSIBLE MANAGED block; the static file carries host1's, once
+      ansible.builtin.assert:
+        that:
+          - "'ANSIBLE MANAGED' not in (_dynfile.content | b64decode)"
+          - "((_statfile.content | b64decode) | regex_findall('BEGIN ANSIBLE MANAGED A: host1.static.test') | length) == 1"
+        quiet: true

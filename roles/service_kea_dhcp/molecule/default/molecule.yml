@@ -1,0 +1,27 @@
+# Offline scenario — renders kea compose + dhcp4 config template (no docker) and asserts coherence.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+  env:
+    # BOTH collection trees, mirroring ansible.cfg. The dhcp4 template uses
+    # `ansible.utils.ipmath` for the subnet/pool maths, and without this the scenario PASSES
+    # LOCALLY AND FAILS ON CI with no local signal: a venv installed from the `ansible` package
+    # bundles the collections inside site-packages so the filter resolves here regardless, while
+    # CI installs them where molecule does not look — and running from inside the role directory
+    # means the repo-root ansible.cfg is not read either. Same class as MOLCOLL-01.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+verifier:
+  name: ansible

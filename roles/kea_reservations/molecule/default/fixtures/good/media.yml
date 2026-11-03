@@ -1,0 +1,7 @@
+---
+subnet_id: 30
+hw_address: "02:00:5E:10:00:01"
+ip_address: "203.0.113.6"
+hostname: "media"
+why: >-
+  Published in DNS as media.media.vlans.example.com; a reverse proxy routes to that name.

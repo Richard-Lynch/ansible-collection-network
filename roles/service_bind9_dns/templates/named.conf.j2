@@ -1,0 +1,14 @@
+{# named.conf — flat layout. This file is rendered force:false (see
+   tasks/main.yml) so the zone stanzas appended below the markers by add_domain/add_vlan survive
+   re-runs — but that also means options{}/logging{} can NEVER be updated here after first deploy.
+   They live in the separately-included named.conf.options, which IS rendered fresh every run. #}
+include "/etc/bind/named.conf.keys";
+include "/etc/bind/named.conf.options";
+
+// --- STATIC ---
+// (primary zone stanzas appended here by add_domain)
+// --- END STATIC
+
+// --- DYNAMIC (VLANS) ---
+// (per-vlan forward + reverse zone stanzas appended here by add_vlan)
+// --- END OF DYNAMIC (VLANS) ---

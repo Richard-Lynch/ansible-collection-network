@@ -1,0 +1,81 @@
+---
+# Three cases through the role's OWN compute.yml. Entering via tasks_from still executes the role's
+# real code — the tautology trap is re-deriving the filter chain in verify.yml, not the entry point.
+- name: Converge
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _svc_nl: "\n"
+    svc_dns_zone: "svc.apps.example.com"
+    svc_dns_target: "app1.apps.example.com"
+    bind9_addr: "192.0.2.3"
+    svc_dns_ttl: 60
+
+  tasks:
+    # CASE 1 — the mixed case that exercises every branch at once:
+    #   keepme    already correct        -> no churn (idempotence)
+    #   stalename mine, no longer wanted -> delete
+    #   foreign   ANOTHER host's record  -> must be left completely alone
+    #   newname   wanted, absent         -> add
+    - name: Case 1 — mixed zone
+      ansible.builtin.include_role:
+        name: dns_service_registrar
+        tasks_from: compute.yml
+      vars:
+        svc_dns_names: ["keepme", "newname"]
+        svc_dns_current:
+          - { name: "keepme", target: "app1.apps.example.com" }
+          - { name: "stalename", target: "app1.apps.example.com" }
+          - { name: "foreign", target: "app2.apps.example.com" }
+
+    - name: Case 1 — persist results
+      ansible.builtin.set_fact:
+        c1_adds: "{{ svc_dns_adds }}"
+        c1_deletes: "{{ svc_dns_deletes }}"
+        c1_script: "{{ svc_dns_script }}"
+
+    # CASE 2 — first run against an empty zone.
+    - name: Case 2 — empty zone
+      ansible.builtin.include_role:
+        name: dns_service_registrar
+        tasks_from: compute.yml
+      vars:
+        svc_dns_names: ["alpha", "beta"]
+        svc_dns_current: []
+
+    - name: Case 2 — persist results
+      ansible.builtin.set_fact:
+        c2_adds: "{{ svc_dns_adds }}"
+        c2_deletes: "{{ svc_dns_deletes }}"
+
+    # CASE 3 — a wanted name is already claimed by ANOTHER host. Must hard-fail rather than
+    # silently repointing a live service.
+    - name: Case 3 — cross-host conflict must fail
+      block:
+        - name: Case 3 — attempt
+          ansible.builtin.include_role:
+            name: dns_service_registrar
+            tasks_from: compute.yml
+          vars:
+            svc_dns_names: ["dashboard"]
+            svc_dns_current:
+              - { name: "dashboard", target: "app2.apps.example.com" }
+        - name: Case 3 — reached only if the gate did NOT fire
+          ansible.builtin.set_fact:
+            c3_failed: false
+      rescue:
+        - name: Case 3 — the gate fired, as required
+          ansible.builtin.set_fact:
+            c3_failed: true
+
+    # set_fact does not survive between molecule's converge and verify playbooks (separate runs),
+    # so the results are handed over on disk. Writing them as JSON keeps verify's assertions
+    # comparing plain data against hand-typed literals.
+    - name: Hand the computed results to verify.yml
+      ansible.builtin.copy:
+        dest: "/tmp/molecule_dns_service_registrar.json"
+        mode: "0644"
+        content: |
+          {{ {'c1_adds': c1_adds, 'c1_deletes': c1_deletes, 'c1_script': c1_script,
+              'c2_adds': c2_adds, 'c2_deletes': c2_deletes,
+              'c3_failed': c3_failed} | to_nice_json }}

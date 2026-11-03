@@ -1,0 +1,158 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/service_pihole/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_pihole
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Pi-hole ad-block/forwarding DNS
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      pihole_web_password:
+        description: Web/API password (from your secrets manager). Placeholder is rejected.
+        type: str
+        required: true
+      pihole_image:
+        type: str
+        required: false
+      pihole_dns_port:
+        type: int
+        required: false
+        default: 5053
+      pihole_web_http_port:
+        type: int
+        required: false
+        default: 5080
+      pihole_web_https_port:
+        type: int
+        required: false
+        default: 5443
+      pihole_timezone:
+        type: str
+        required: false
+        default: UTC
+      pihole_upstreams:
+        description: Public DNS upstreams pihole forwards to.
+        type: list
+        required: false
+        elements: str
+      pihole_listening_mode:
+        type: str
+        required: false
+        default: all
+      pihole_adlists:
+        description: Ad-block list URLs (gravity rebuilt from these).
+        type: list
+        required: false
+        elements: str
+      pihole_dns_bind_ip:
+        description: Host IP the DNS port publish binds to. Empty/undefined binds all addresses (port pihole_dns_port). Set to the service address with pihole_dns_port=53 in the Pi-hole-in-front topology so Pi-hole becomes the client-facing resolver without also grabbing every other address on the host.
+        type: str
+        required: false
+      pihole_reply_host_ip:
+        description: "Fixed IPv4 address FTL uses when it auto-answers queries for its OWN hostname/pi.hole (FTL's 'local interface' reply logic, pihole.toml dns.reply.host). Empty/undefined leaves FTL's default behaviour: it detects the interface a query arrived on and answers with THAT address. Docker sets the container's kernel hostname to the FULL pihole_hostname string (dots included, e.g. 'pihole.example.com'), so FTL's own-hostname match fires for that name too, and once Pi-hole is the client-facing front door FTL answers from the docker-bridge interface (a 172.x address) instead of the service address every other local name uses. Set this to the service address in the front-door topology so pi.hole AND the full hostname both answer the address bind9 is authoritative for, instead of the shadowing address. Rendered as FTLCONF_dns_reply_host_force4=true + FTLCONF_dns_reply_host_IPv4=<value>."
+        type: str
+        required: false
+      pihole_rev_servers:
+        description: Conditional-forwarding ('reverse server') entries, one per CIDR, format '<enabled>,<ip-cidr>,<server>[#port][,<domain>]'. Rendered as FTLCONF_dns_revServers (pihole.toml dns.revServers). Used for each local subnet's reverse zone so Pi-hole delegates them to bind9 instead of sending them upstream, and to get real device names instead of bare IPs. Default [].
+        type: list
+        required: false
+        elements: str
+      pihole_dnsmasq_lines:
+        description: Raw dnsmasq config lines for forwarding that pihole_rev_servers cannot express (a plain domain not tied to one CIDR, e.g. the primary example.com zone). Rendered as FTLCONF_misc_dnsmasq_lines. Default []. Advanced — malformed lines can break DNS resolution entirely.
+        type: list
+        required: false
+        elements: str
+      pihole_allow_domains:
+        description: Domains ALWAYS allowed, reconciled via the Pi-hole v6 REST API (/api/domains). Repo list is the source of truth; entries not in this list are removed from Pi-hole on apply. Add single-domain overrides here — see the README for exactly where.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_deny_domains:
+        description: Domains ALWAYS blocked, reconciled the same way as pihole_allow_domains.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_allow_regex:
+        description: Regex allow rules (kind=regex, not exact), reconciled the same way as pihole_allow_domains via the v6 REST API. Separate from pihole_allow_domains so an exact domain is never silently reinterpreted as a pattern.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_deny_regex:
+        description: Regex deny rules, reconciled the same way as pihole_allow_regex.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_groups:
+        description: Reserved for future group management (cheap to add; see README).
+        type: list
+        required: false
+        default: []
+        elements: dict
+      pihole_clients:
+        description: Reserved for future client management (cheap to add; see README).
+        type: list
+        required: false
+        default: []
+        elements: dict
+      pihole_domains_apply:
+        description: "Generate-don't-apply for domain rule reconciliation: false (default) reports the drift between the repo list and Pi-hole's live domains and changes nothing; true reconciles via the REST API (add missing, remove extra)."
+        type: bool
+        required: false
+        default: false
+      pihole_api_host:
+        description: Address manage_domains calls the Pi-hole REST API on.
+        type: str
+        required: false
+        default: 127.0.0.1
+      pihole_domains_managed_comment:
+        description: Comment stamped on every domain rule this role creates, and the only marker manage_domains uses to decide a live rule is safe to remove. Rules with any other comment (added by hand in the web UI) are never touched.
+        type: str
+        required: false
+  manage_domains:
+    short_description: Reconcile Pi-hole allow/deny domain rules via the v6 REST API (present/absent)
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      pihole_allow_domains:
+        description: Domains ALWAYS allowed. Source of truth — see defaults/main.yml.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_deny_domains:
+        description: Domains ALWAYS blocked. Source of truth — see defaults/main.yml.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_allow_regex:
+        description: Regex allow rules (kind=regex). Source of truth — see defaults/main.yml.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_deny_regex:
+        description: Regex deny rules (kind=regex). Source of truth — see defaults/main.yml.
+        type: list
+        required: false
+        default: []
+        elements: str
+      pihole_domains_apply:
+        description: false = report the diff only (default); true = reconcile via the API.
+        type: bool
+        required: false
+        default: false
+      pihole_web_password:
+        description: Web/API password (from your secrets manager). Placeholder is rejected.
+        type: str
+        required: true

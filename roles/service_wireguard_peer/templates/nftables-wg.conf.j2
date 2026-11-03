@@ -1,0 +1,27 @@
+{#
+  nftables policy for the tunnel interface. Installed ONLY where wireguard_manage_nftables is true.
+  The other end gets ZERO firewall changes from this role: on a host whose rules belong to
+  something else (Docker, a host-networked service), an INPUT rule from here would sit directly in
+  front of traffic this role knows nothing about.
+
+  DEFAULT POSTURE: this side may initiate anything across the tunnel; the far end may only reply.
+  wireguard_inbound_allow punches specific holes for flows the FAR end must INITIATE — a metrics
+  or log shipper pushing to this side, for example. Without that list this policy would block the
+  reason the link exists, and would then get "fixed" ad hoc.
+#}
+table inet wgfilter {
+  chain forward {
+    type filter hook forward priority filter; policy accept;
+
+    # Replies to anything this side started.
+    iifname "{{ wireguard_interface }}" ct state established,related accept
+
+{% for rule in wireguard_inbound_allow %}
+    # {{ rule.comment | default('caller-declared inbound flow') }}
+    iifname "{{ wireguard_interface }}" ip daddr {{ rule.daddr }} {{ rule.proto | default('tcp') }} dport {{ rule.dport }} accept
+{% endfor %}
+
+    # Anything else arriving FROM the tunnel and not matched above.
+    iifname "{{ wireguard_interface }}" drop
+  }
+}

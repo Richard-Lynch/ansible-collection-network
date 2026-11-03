@@ -1,0 +1,58 @@
+{# pihole v6 — config via FTLCONF_* env; adlists + gravity persisted in ./etc-pihole. #}
+services:
+  {{ pihole_service_name }}:
+    container_name: {{ pihole_service_name }}
+    hostname: {{ pihole_hostname }}
+    image: {{ pihole_image }}
+    ports:
+{% if pihole_dns_bind_ip | default('') %}
+      # Front door: bind ONLY the service address so pihole does not also grab every other
+      # address on the host (in particular the one the authoritative server behind it needs).
+      # Docker DNAT for an explicit HostIp still preserves the real client source address — that
+      # is what makes per-client attribution work once clients query pihole directly.
+      - "{{ pihole_dns_bind_ip }}:{{ pihole_dns_port }}:53/tcp"
+      - "{{ pihole_dns_bind_ip }}:{{ pihole_dns_port }}:53/udp"
+{% else %}
+      # DNS on host:{{ pihole_dns_port }} -> container:53 (a resolver in front forwards here). No
+      # HostIp = binds all addresses.
+      - "{{ pihole_dns_port }}:53/tcp"
+      - "{{ pihole_dns_port }}:53/udp"
+{% endif %}
+      - "{{ pihole_web_http_port }}:80"
+      - "{{ pihole_web_https_port }}:443"
+    environment:
+      TZ: "{{ pihole_timezone }}"
+      FTLCONF_webserver_api_password: "{{ pihole_web_password }}"
+      FTLCONF_dns_listeningMode: "{{ pihole_listening_mode | upper }}"
+      FTLCONF_dns_upstreams: "{{ pihole_upstreams | join(';') }}"
+{% if pihole_rev_servers | default([]) | length > 0 %}
+      # Conditional forwarding (formerly "reverse server") — each CIDR in pihole_rev_servers is
+      # delegated to the listed server instead of going upstream. This is what gives Pi-hole real
+      # device NAMES instead of bare IPs once it is the client-facing front door. Format per entry:
+      #   "<enabled>,<ip-cidr>,<server>[#port][,<domain>]"
+      FTLCONF_dns_revServers: "{{ pihole_rev_servers | join(';') }}"
+{% endif %}
+{% if pihole_dnsmasq_lines | default([]) | length > 0 %}
+      # Raw dnsmasq lines for forwarding that revServers cannot express (a plain domain not scoped to
+      # one CIDR, e.g. a primary zone that spans several subnets). One `server=/domain/ip`
+      # line per domain. Handle with care: malformed lines can break DNS resolution entirely.
+      FTLCONF_misc_dnsmasq_lines: "{{ pihole_dnsmasq_lines | join(';') }}"
+{% endif %}
+{% if pihole_reply_host_ip | default('') %}
+      # Keeps the container's own hostname from resolving to a docker-internal address: docker sets
+      # this container's KERNEL hostname to the full pihole_hostname string, dots and all
+      # (`hostname` inside the container prints e.g. "pihole.example.com" verbatim).
+      # FTL's "local interface" reply logic (pihole.toml [dns.reply.host]) auto-answers queries for
+      # pi.hole AND for the machine's own hostname with whatever address the query arrived on —
+      # which, once pihole is the client-facing front door, is the docker bridge (a 172.x address),
+      # not the service address every other local name resolves to. force4+IPv4 pins BOTH names
+      # (pi.hole and the full hostname) to a fixed address instead of the auto-detected one — this
+      # does not disable pi.hole, it corrects what it (and the real hostname) point at.
+      FTLCONF_dns_reply_host_force4: "true"
+      FTLCONF_dns_reply_host_IPv4: "{{ pihole_reply_host_ip }}"
+{% endif %}
+    volumes:
+      - "./etc-pihole:/etc/pihole"
+    cap_add:
+      - SYS_NICE
+    restart: unless-stopped

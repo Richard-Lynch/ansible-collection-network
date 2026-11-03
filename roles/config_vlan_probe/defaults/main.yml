@@ -1,0 +1,69 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/config_vlan_probe/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate config_vlan_probe
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Tooling installed on the probe.
+# NOTE community.general.wakeonlan needs NOTHING here: it builds and
+# sends the magic packet from the module's own Python over a UDP socket,
+# so no etherwake/wakeonlan binary is required.
+# avahi/gssdp and tcpdump are deliberately NOT included — an unused
+# daemon on every VLAN is attack surface for a capability nobody asked
+# for, and avahi-daemon would make the probe an mDNS PARTICIPANT rather
+# than an observer.
+config_vlan_probe_packages__default:
+  - iputils-arping
+  - iputils-ping
+  - iproute2
+  - dnsutils
+
+# Wakeable targets, as {name: {mac, broadcast, port}}. THE ALLOWLIST IS
+# THE SECURITY MODEL: a caller names an entry and cannot supply a MAC or
+# a broadcast address, so the endpoint is a wake button rather than a
+# packet injector on every segment. Declare them in inventory — they are
+# installation facts, and the entrypoint asserts each broadcast lands in a
+# subnet this guest actually holds a leg in, because a send into a
+# segment it is not on succeeds and wakes nothing.
+# Empty (default) means the entrypoint refuses to deploy.
+config_vlan_probe_wake_targets__default: {}
+
+# TCP port for the HTTP endpoint. Pick one nothing else on the guest uses.
+# The endpoint has no authentication; restrict who can reach this port.
+config_vlan_probe_wake_port__default: 8080
+
+# systemd unit name for the endpoint. The prefix marks it as
+# Ansible-managed on the guest; override it to match your own convention.
+config_vlan_probe_wake_unit__default: iaac-wake-endpoint.service
+
+# Where the endpoint script is installed. Stdlib-only, so there is no
+# virtualenv and nothing to install beyond python3.
+config_vlan_probe_wake_script__default: /usr/local/bin/iaac_wake_endpoint.py
+
+# UDP broadcasts to carry from one VLAN leg to another, ONE WAY, with the
+# sender's address preserved so the answer (a unicast) goes straight back
+# to it. For LAN game discovery, which cannot cross a VLAN. THE LIST IS
+# THE ALLOWLIST: only these ports, legs and directions. Installation config —
+# declare in inventory; the entrypoint asserts both legs are held.
+config_vlan_probe_relays__default: []
+
+# Packets per second the relay re-emits, across all relays — the cap that
+# stops a flood on one leg being amplified onto another. Discovery is a
+# handful of packets per refresh.
+config_vlan_probe_relay_rate__default: 20
+
+# systemd unit name for the relay.
+config_vlan_probe_relay_unit__default: iaac-broadcast-relay.service
+
+# Where the relay script is installed (stdlib-only).
+config_vlan_probe_relay_script__default: /usr/local/bin/iaac_broadcast_relay.py
+
+# false (default) reports what would change and asserts position only.
+# true installs tooling. Never set from a role default — this is the
+# explicit act-vs-report gate.
+config_vlan_probe_apply__default: false

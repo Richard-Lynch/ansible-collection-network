@@ -1,0 +1,156 @@
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "{{ kea_interface }}" ],
+      {# RELAY-ONLY BY DESIGN. Kea runs in a container behind a port map, so it can never
+         legitimately see a client broadcast — every packet it should serve arrives as relayed
+         unicast from the router's DHCP relay with giaddr set. `udp` states that explicitly rather than leaving Kea
+         on raw sockets it cannot meaningfully use here. No behaviour change for the relayed VLANs;
+         their traffic is plain unicast to the container either way. #}
+      "dhcp-socket-type": "{{ kea_socket_type | default('udp') }}"
+    },
+    {# AUTHORITATIVE: this is the only DHCP server for the subnets it serves, so when a client
+       REQUESTs an address we will not grant (e.g. one it holds from an older, wider pool), answer
+       DHCPNAK rather than staying silent.
+
+       Kea's default is false = ignore. That turns a renumber into a slow mystery: the client keeps
+       retrying its old address, gets nothing, limps to lease expiry and only THEN
+       rediscovers — long after any cutover verification has gone green. With authoritative=true the
+       client is NAKed immediately, re-DISCOVERs, and moves within seconds — visible and fast. #}
+    "authoritative": {{ kea_authoritative | default(true) | to_json }},
+
+    {# SERVER IDENTIFIER (DHCP option 54) — the address clients unicast their T1 renewal to.
+       Kea runs in a DOCKER CONTAINER on a bridge network behind a 67/udp port map, so its own
+       interface address is a 172.x bridge address — docker-internal and unroutable from any VLAN. Left to
+       derive it, Kea advertises that, and every client's unicast renewal goes nowhere.
+
+       A well-behaved client then falls back to a T2 broadcast rebind, which the relay rescues,
+       so this LOOKS fine — but every client is silently failing half the renewal protocol, and any
+       client whose DHCP daemon dies instead of rebinding never re-acquires at all: lease expires,
+       address vanishes, host sits running-but-unreachable.
+
+       Pin it to the host's real address so renewals reach the server directly. #}
+    "option-data": [
+      { "name": "dhcp-server-identifier", "data": "{{ kea_server_identifier }}" }
+    ],
+
+    {# Match reservations on MAC ALONE, ignoring the client-identifier option.
+
+       Kea prefers client-id over MAC when a client sends one. A client that sends DIFFERENT
+       client-ids across reboots under one MAC then misses its MAC reservation and is handed a fresh
+       pool address, breaking every consumer pinned to the old one. Matching on MAC makes a
+       reservation mean what the owner expects: this machine always gets this address, regardless
+       of what its DHCP client decides to identify as.
+
+       Safe only where no two hosts share a MAC; set kea_match_client_id otherwise. #}
+    "match-client-id": {{ kea_match_client_id | default(false) | to_json }},
+
+    {# CONTROL SOCKET — how anything asks the RUNNING server what it actually loaded.
+
+       Without this stanza kea-dhcp4 opens no control channel at all, and the consequence is
+       invisible rather than loud: the image's kea-ctrl-agent (already running) is configured for
+       "/run/kea/control_socket_4", and with no socket to connect to it answers every config-get
+       with result:1 — a reachable API that can never succeed. Any reader that then falls back to
+       the rendered file on disk reports something that does not prove what the process loaded.
+
+       That matters because service_kea_dhcp restarts only `when: deployment_config_changed`: a
+       re-render after a failed run leaves the process serving stale config from memory while the
+       file on disk looks correct. Reading the file cannot see that; the socket can.
+
+       Path matches the control agent's expectation exactly. /run/kea is a tmpfs (see the compose
+       file) so the socket cannot outlive the container. #}
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "/run/kea/control_socket_4"
+    },
+
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/dhcp.leases"
+    },
+    "subnet4": [
+{% for vlan in kea_vlans %}
+      {
+        "id": {{ vlan.id }},
+        "subnet": "{{ (vlan.base ~ '/' ~ vlan.cidr | string) }}",
+        "relay": { "ip-addresses" : [ "{{ (vlan.base ~ '/' ~ vlan.cidr | string) | ansible.utils.ipmath(0) }}" ] },
+        {# Pool starts AFTER the reserved band (see kea_pool_offset): .1 = gateway, .2 up to the
+           offset = statics and DHCP reservations, the offset onwards = dynamic. Reserved addresses must sit OUTSIDE the pool, or Kea
+           can lease them to whoever asks first before the reserving host renews. #}
+        "pools": [ { "pool": "{{ (vlan.base ~ '/' ~ vlan.cidr | string) | ansible.utils.ipmath(kea_pool_offset) }} - {{ (vlan.base ~ '/' ~ vlan.cidr | string) | ansible.utils.ipmath(250) }}" } ],
+        "ddns-qualifying-suffix": "{{ vlan.name }}.{{ vlan.domain_name }}.",
+        "option-data": [
+          { "name": "routers", "data": "{{ (vlan.base ~ '/' ~ vlan.cidr | string) | ansible.utils.ipmath(0) }}" },
+          {# option 6 is CLIENT-FACING: it must name the SERVICE address (the one that follows the
+             service across a cutover), not the host's management address. Falls back to
+             kea_dns_servers so callers that never made the distinction keep working. #}
+          { "name": "domain-name-servers", "data": "{{ (kea_option_dns_servers | default(kea_dns_servers)) | map(attribute='ip') | join(', ') }}" },
+          { "name": "domain-name", "data": "{{ vlan.name }}.{{ vlan.domain_name }}" }
+        ],
+{% set _res = (kea_reservations | default([])) | selectattr('subnet_id', 'equalto', vlan.id) | list %}
+        "reservations": [
+{% for r in _res %}
+          { "hw-address": "{{ r.hw_address }}", "ip-address": "{{ r.ip_address }}"{% if r.hostname is defined %}, "hostname": "{{ r.hostname }}"{% endif %} }{% if not loop.last %},{% endif %}
+{% endfor %}
+        ]
+      }{% if not loop.last %},{% endif %}
+{% endfor %}
+    ],
+    "ddns-send-updates": true,
+    "ddns-replace-client-name": "when-not-present",
+    "ddns-generated-prefix": "dhcp",
+{% if kea_ddns_conflict_mode | default('') | length > 0 %}
+    {# TEMPORARY, MIGRATION ONLY — normally absent entirely.
+
+       Default RFC 4703 conflict resolution makes D2 attach prerequisites to every update ("this
+       name has MY DHCID" / "this name does not exist"). Both correctly FAIL against a hand-written
+       static A that carries no DHCID, so a host whose name was first published as a static record
+       is rejected on every registration attempt.
+
+       "no-check-with-dhcid" drops the prerequisites but still WRITES a DHCID, so D2 overwrites the
+       static in place and takes ownership. The name never stops resolving — no delete-then-wait
+       window, during which every CNAME chained onto that name would go dark for as long as
+       registration took, plus the negative-cache TTL.
+
+       Set only for the duration of a cutover, then removed. While set, conflict checking is off for
+       every Kea-served subnet, so any client Kea knows about could in principle claim a name it
+       does not own — TSIG-gated and attended, but not something to leave on. #}
+    "ddns-conflict-resolution-mode": "{{ kea_ddns_conflict_mode }}",
+{% endif %}
+    {# Re-assert DNS on every RENEWAL, not only on a lease CHANGE (Kea's default is false).
+
+       Two reasons:
+       1. SELF-HEALING. Kea does NOT retry a failed DDNS update — a rejected NCR is dropped
+          (DHCP_DDNS_NO_ELIGIBLE_JOBS, "Queue count: 0"). So a bind9 restart or a
+          transient failure at the wrong moment leaves a name dark until the next lease EVENT,
+          potentially days. With update-on-renew every T1 (~half of valid-lifetime) re-asserts it.
+       2. A migration onto DDNS needs a predictable registration trigger. Without this, "force a
+          renewal" produces no DDNS traffic at all when the lease is otherwise unchanged, and the
+          absence is indistinguishable from "the fix didn't work".
+
+       CAUTION: this is the point at which Kea-served zones become journaled, after which any
+       tooling that edits those zone files directly can no longer manage records in them. From
+       here, corrections to Kea-served zones must go through dynamic updates (nsupdate). #}
+    "ddns-update-on-renew": {{ kea_ddns_update_on_renew | default(true) | to_json }},
+
+    {# Pinned rather than left to Kea's implicit 7200s default, so the renewal cadence the point
+       above depends on is a stated property of the config instead of an inherited accident.
+       T1 (renew) defaults to 50% of valid-lifetime, T2 (rebind) to 87.5%. #}
+    "valid-lifetime": {{ kea_valid_lifetime | default(7200) }},
+    "renew-timer": {{ kea_renew_timer | default(3600) }},
+    "rebind-timer": {{ kea_rebind_timer | default(6300) }},
+    "dhcp-ddns": {
+      "enable-updates": true,
+      "server-ip": "__DDNS_IP__",
+      "server-port": 53001,
+      "sender-ip": "0.0.0.0",
+      "sender-port": 0,
+      "max-queue-size": 1024,
+      "ncr-protocol": "UDP",
+      "ncr-format": "JSON",
+      "override-no-update": true,
+      "override-client-update": true
+    }
+  }
+}

@@ -1,0 +1,75 @@
+# Merge fixtures and assert the RESULT. Every guard is then proven to FAIL on bad input in
+# verify.yml — a test that has only ever passed proves nothing about whether the guard can fire.
+---
+- name: Converge — merge reservations from a fixture directory
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _fixtures: "{{ playbook_dir }}/fixtures/good"
+    # Minimal kea_vlans so the subnet-membership and band checks are exercised rather than skipped.
+    # No `dns:` key — in the real pipeline its absence is what makes a VLAN Kea-served.
+    kea_vlans:
+      - { id: 30, name: media, domain_name: vlans.example.com, base: 203.0.113.1, cidr: 24, gateway: 203.0.113.1 }
+      - { id: 40, name: internal, domain_name: vlans.example.com, base: 198.51.100.1, cidr: 24, gateway: 198.51.100.1 }
+
+  tasks:
+    - name: Merge the good fixtures
+      ansible.builtin.include_role:
+        name: kea_reservations
+      vars:
+        kea_reservations_dir: "{{ _fixtures }}"
+
+    - name: Assert the merge produced the expected set
+      ansible.builtin.assert:
+        that:
+          - kea_reservations | length == 3
+          - (kea_reservations | map(attribute='hostname') | sort | list) == ['appliance', 'media', 'nas']
+          - (kea_reservations | selectattr('hostname', 'eq', 'nas') | first).ip_address == '198.51.100.3'
+          - (kea_reservations | selectattr('hostname', 'eq', 'nas') | first).subnet_id == 40
+        fail_msg: "merge did not produce the expected reservation set: {{ kea_reservations }}"
+        success_msg: "merged 3 reservations from 3 files, fields intact"
+        quiet: true
+
+    - name: Assert validation metadata is STRIPPED from what the kea role receives
+      # `_source_file` and `why` are validation/documentation metadata. service_kea_dhcp's argspec
+      # declares the element options, so an undeclared extra key would be rejected by
+      # validate_argument_spec on the way in — and `why` must never reach the rendered JSON.
+      ansible.builtin.assert:
+        that:
+          - kea_reservations | map('list') | flatten | reject('in', ['subnet_id', 'hw_address', 'ip_address', 'hostname']) | list | length == 0
+        fail_msg: >-
+          extra keys leaked into kea_reservations:
+          {{ kea_reservations | map('list') | flatten | unique | list }}
+        success_msg: "only subnet_id/hw_address/ip_address/hostname reach the kea role"
+        quiet: true
+
+    - name: Assert the annotated set RETAINS the rationale, for reporting
+      # Stripped for the role, kept for humans — the `why` is the part that cannot be reconstructed.
+      ansible.builtin.assert:
+        that:
+          - _kea_reservations_annotated | selectattr('why', 'defined') | list | length == 3
+          - (_kea_reservations_annotated | selectattr('hostname', 'eq', 'nas') | first)._source_file == 'nas.yml'
+        fail_msg: "the annotated set lost its provenance or rationale"
+        success_msg: "annotated set retains `why` and `_source_file` for every entry"
+        quiet: true
+
+    - name: Assert caller-supplied extras merge and validate identically
+      ansible.builtin.include_role:
+        name: kea_reservations
+      vars:
+        kea_reservations_dir: "{{ _fixtures }}"
+        kea_reservations_extra:
+          - subnet_id: 40
+            hw_address: "BC:24:11:AA:BB:CC"
+            ip_address: "198.51.100.9"
+            hostname: "extra-host"
+            why: "supplied by the caller during migration"
+
+    - name: Assert the extra was merged
+      ansible.builtin.assert:
+        that:
+          - kea_reservations | length == 4
+          - "'extra-host' in (kea_reservations | map(attribute='hostname') | list)"
+        fail_msg: "caller-supplied extras did not merge: {{ kea_reservations }}"
+        success_msg: "caller-supplied extras merge alongside the directory"
+        quiet: true

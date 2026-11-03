@@ -1,0 +1,49 @@
+{#
+  WireGuard peer config. Rendered by roles/service_wireguard_peer.
+
+  THE PRIVATE KEY IS DELIBERATELY ABSENT. It is written to its own 0600 file and loaded by the
+  PostUp below. Reason: this role follows generate-don't-apply, which means printing config diffs —
+  and a key in the config forces a choice between no_log (which kills the diff) and leaking the
+  secret into transcripts and CI logs. Keeping it out means the config diffs freely forever.
+
+  Table = off by default: wg-quick installs NO routes. AllowedIPs still filters inbound and selects
+  outbound, but the routing table is ours to manage explicitly. With Table unset, an AllowedIPs of
+  0.0.0.0/0 would replace the host's default route — on a remote public box that is a total strand
+  with no way back except the provider console.
+#}
+[Interface]
+Address = {{ wireguard_address }}
+MTU = {{ wireguard_mtu }}
+Table = {{ 'off' if wireguard_table in ['none', 'off'] else wireguard_table }}
+{% if wireguard_listen_port | int > 0 %}
+ListenPort = {{ wireguard_listen_port }}
+{% endif %}
+PostUp = wg set %i private-key {{ wireguard_private_key_path }}
+{% for cidr in (wireguard_peers | map(attribute='allowed_ips') | flatten | unique) %}
+{% if not (cidr | ansible.utils.ipaddr(wireguard_address | ansible.utils.ipaddr('subnet'))) %}
+{#
+  ROUTES BELONG HERE, NOT IN A RUNTIME COMMAND. Table=off means wg-quick installs no routes of its
+  own, so each AllowedIPs CIDR outside the tunnel's own subnet needs one — and a CIDR without a
+  route is silently sent to the DEFAULT GATEWAY: cryptokey routing accepts the packet and the
+  kernel never hands it to the interface.
+  An `ip route replace` from a task does that once and is LOST AT REBOOT: the tunnel then
+  handshakes, AllowedIPs is right, and the far subnet routes out the default interface — traffic
+  silently stops while every tunnel check stays green. PostUp runs on every interface start,
+  including at boot.
+#}
+PostUp = ip route replace {{ cidr }} dev %i
+{% endif %}
+{% endfor %}
+
+{% for peer in wireguard_peers %}
+[Peer]
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+{% if peer.endpoint | default('') | length > 0 %}
+Endpoint = {{ peer.endpoint }}
+{% endif %}
+{% if peer.persistent_keepalive | default(0) | int > 0 %}
+PersistentKeepalive = {{ peer.persistent_keepalive }}
+{% endif %}
+
+{% endfor %}

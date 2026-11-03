@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Reconcile a service-name DNS zone against the services a host actually runs, through TSIG-signed
+    dynamic updates, so each service's name is a CNAME to its host.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [dns, bind, ddns, networking]
+dependencies: []

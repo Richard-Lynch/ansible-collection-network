@@ -1,0 +1,44 @@
+# Copyright: (c) 2026, Richard Lynch
+# GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+---
+namespace: richard_lynch
+name: network
+version: 1.0.0
+readme: README.md
+authors:
+  - Richard Lynch
+description: >-
+  Network service roles: BIND 9 authoritative and recursive DNS with dynamic updates, Kea DHCP with per-host reservations, DNS service registration, Pi-hole, Headscale and Tailscale, WireGuard peers, UniFi networks, DHCP options and WLANs through the controller API, and a multi-VLAN probe.
+license:
+  - GPL-3.0-or-later
+tags:
+  - networking
+  - dns
+  - dhcp
+  - infrastructure
+  - linux
+dependencies:
+  ansible.posix: ">=2.0.0"
+  ansible.utils: ">=5.0.0"
+  community.docker: ">=4.0.0"
+  community.general: ">=10.0.0"
+  richard_lynch.common: ">=1.0.0,<2.0.0"
+repository: https://github.com/Richard-Lynch/ansible-collection-network
+documentation: https://github.com/Richard-Lynch/ansible-collection-network/blob/main/README.md
+homepage: https://github.com/Richard-Lynch/ansible-collection-network
+issues: https://github.com/Richard-Lynch/ansible-collection-network/issues
+build_ignore:
+  - .ansible-lint
+  - configured_roles.txt
+  - roles/*/defaults/SKIP
+  - .github
+  - .gitignore
+  - collections.galaxy
+  - devkit.toml
+  - dist
+  - export.manifest
+  - tests/output
+  - roles/*/meta/argument_specs.py
+  - roles/*/molecule
+  - "*.tar.gz"

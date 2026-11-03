@@ -1,0 +1,32 @@
+# Offline scenario — exercises the merge/diff logic against a fixture shaped like a controller's
+# networkconf response (56- and 61-key network objects) with no controller and no network access.
+# The API-facing tasks are not run; what matters is that the merge preserves every key, changes
+# only what was asked for, and reports change/no-change correctly.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # The scenario CALLS the role (rather than re-implementing it), so the roles directory must be on
+  # the search path. Without this the include_role fails with "role not found" — which the previous
+  # scenario never hit, because it never invoked the role at all.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # BOTH trees, mirroring ansible.cfg's `collections_path = collections.galaxy:./collections`.
+    # Every vendored collection (ansible.posix, community.general, ...) lives in collections.galaxy/;
+    # only the repo's own my.utils lives in collections/. Pointing at just the latter resolves
+    # NOTHING vendored, and the failure is CI-only because a dev venv bundles them in site-packages.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

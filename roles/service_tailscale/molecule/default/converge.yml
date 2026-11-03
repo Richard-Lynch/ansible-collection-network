@@ -1,0 +1,25 @@
+# Call the real role with a TUN path that cannot exist and require the TUN gate — and nothing
+# earlier, and nothing later — to be what stopped it.
+---
+- name: Converge (guard-only)
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: GUARD — a missing TUN device must stop the role before it installs anything
+      block:
+        - name: Call the role without a TUN device
+          ansible.builtin.include_role:
+            name: service_tailscale
+          vars:
+            tailscale_login_server: https://hs.example.test:8443
+            tailscale_hostname: molecule
+            tailscale_tun_path: /nonexistent/molecule/tun
+        - name: The guard did not fire
+          ansible.builtin.fail:
+            msg: "service_tailscale continued without a TUN device."
+      rescue:
+        - name: Require the TUN gate was what failed
+          ansible.builtin.assert:
+            that:
+              - "'/nonexistent/molecule/tun is missing' in ansible_failed_result.msg | default('')"
+            fail_msg: "Failed for the wrong reason: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"

@@ -1,0 +1,17 @@
+---
+# Restarted rather than reloaded: the allowlist is passed on the command line, so a changed
+# target list is a changed ExecStart and only a restart picks it up. The entrypoint flushes
+# handlers before its read-back, so the /healthz assertion sees the new process rather than
+# passing against the old one.
+- name: Restart the wake endpoint
+  ansible.builtin.systemd_service:
+    name: "{{ config_vlan_probe_wake_unit }}"
+    state: restarted
+    daemon_reload: true
+
+# Restarted for the same reason as the wake endpoint: the relays are on the command line.
+- name: Restart the broadcast relay
+  ansible.builtin.systemd_service:
+    name: "{{ config_vlan_probe_relay_unit }}"
+    state: restarted
+    daemon_reload: true

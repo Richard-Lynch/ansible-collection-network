@@ -1,0 +1,131 @@
+---
+# Ensure a VLAN's forward + reverse zones exist (canonical scheme: <vlan>.<domain_name>).
+# Idempotent. Requires a vlan dict as `bind9_vlan_item` (or bind9_vlan): {name, domain_name, base, cidr}.
+# Derives fqdn + reverse cleanly from name/base — NOT the drift-prone hand-set fqdn field.
+#
+# `domain_name` is the FULL suffix (vlans.example.com), NOT the apex. This must match how kea builds
+# its ddns-qualifying-suffix ("{{ vlan.name }}.{{ vlan.domain_name }}"), or kea registers DDNS names
+# into zones bind9 does not serve (Kea logs DHCP_DDNS_NO_MATCH; bind9 answers NOTAUTH).
+# service_kea_dhcp asserts domain_name == kea_dns_zone_suffix to keep the two ends aligned.
+
+- name: "Add_vlan — normalise input + derive names"
+  ansible.builtin.set_fact:
+    _bv: "{{ bind9_vlan_item | default(bind9_vlan) }}"
+    bind9_default_serial: "{{ now(fmt='%Y%m%d') }}01"
+
+- name: "Add_vlan — canonical forward + reverse zone names"
+  ansible.builtin.set_fact:
+    # Canonical: <vlan>.<domain_name>, where domain_name already carries the `vlans` layer
+    # (vlans.example.com) — do NOT re-insert it here or zones double-qualify.
+    _bind9_vlan_fqdn: "{{ _bv.name }}.{{ _bv.domain_name }}"
+    # Reverse zone for a /24: first 3 octets of base, reversed, + .in-addr.arpa
+    _bind9_vlan_reverse: "{{ _bv.base.split('.')[0:3] | reverse | join('.') }}.in-addr.arpa"
+    # Service-registration zone, one per Kea-served VLAN. A CHILD of the VLAN zone, created only
+    # when that VLAN is dynamic (below); its records are written by dns_service_registrar.
+    _bind9_svc_fqdn: "svc.{{ _bv.name }}.{{ _bv.domain_name }}"
+
+- name: "Add_vlan — forward zone file exists?"
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones/{{ _bind9_vlan_fqdn }}.zone"
+  register: _fwd_zone
+
+- name: "Add_vlan — create the forward zone (when absent)"
+  ansible.builtin.template:
+    src: master.vlan.zone.j2
+    dest: "{{ bind9_config_dir }}/zones/{{ _bind9_vlan_fqdn }}.zone"
+    mode: "0644"
+  when: not _fwd_zone.stat.exists
+  notify: Restart bind9
+
+- name: "Add_vlan — reverse zone file exists?"
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones/rev.{{ _bind9_vlan_fqdn }}.zone"
+  register: _rev_zone
+
+- name: "Add_vlan — create the reverse zone (when absent)"
+  ansible.builtin.template:
+    src: reverse.vlan.zone.j2
+    dest: "{{ bind9_config_dir }}/zones/rev.{{ _bind9_vlan_fqdn }}.zone"
+    mode: "0644"
+  when: not _rev_zone.stat.exists
+  notify: Restart bind9
+
+# Only VLANs Kea actually serves may accept dynamic updates. The predicate is the SAME one a caller
+# uses to build Kea's subnet list (`vlans.values() | selectattr('dns', 'undefined')`): a VLAN carrying
+# its own `dns:` key is served by something else, so Kea has no ddns-domain for it and could never
+# register a name there anyway.
+#
+# Granting allow-update to such a zone is therefore pure downside. A static zone typically holds the
+# infrastructure's own records (hypervisors, the DNS/DHCP host), and one stray accepted update would
+# journal the zone, at which point bind9 owns the file and the record pipeline can no longer manage it
+# (state:absent silently no-ops; state:present duplicates, and a duplicate CNAME refuses to load the
+# WHOLE zone). `{ none; }` makes "this zone is static" structurally true rather than merely intended.
+- name: "Add_vlan — svc zone file exists?"
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones/{{ _bind9_svc_fqdn }}.zone"
+  register: _svc_zone
+  when: _bv.dns is not defined
+
+- name: "Add_vlan — create the svc zone (when absent)"
+  # Same template as any forward zone; it starts empty apart from SOA/NS. Every record in it is
+  # written later by dns_service_registrar via nsupdate, never by this role and never by hand.
+  ansible.builtin.template:
+    src: master.domain.zone.j2
+    dest: "{{ bind9_config_dir }}/zones/{{ _bind9_svc_fqdn }}.zone"
+    owner: "{{ bind9_zones_owner_uid | default(100) }}"
+    group: "{{ bind9_zones_owner_gid | default(101) }}"
+    mode: "0644"
+  vars:
+    bind9_domain: "{{ _bind9_svc_fqdn }}"
+  when:
+    - _bv.dns is not defined
+    - not (_svc_zone.stat.exists | default(false))
+  notify: Restart bind9
+
+- name: "Add_vlan — register the svc zone in named.conf (registrar-owned, svc-key only)"
+  # NOTE: no NS delegation record is added to the parent zone, deliberately. bind9 serves both
+  # parent and child here and always answers from the most specific zone it holds, so the child
+  # resolves with zero records in the parent — which keeps the parent 100% Kea-owned. Adding NS glue
+  # would mean writing human-chosen records into a Kea zone, re-creating the mixed-ownership problem
+  # this sub-zone exists to remove. Do not "fix" this by adding a delegation.
+  ansible.builtin.blockinfile:
+    path: "{{ bind9_config_dir }}/config/named.conf"
+    marker: "// {mark} ANSIBLE MANAGED BLOCK: {{ _bind9_svc_fqdn }}"
+    insertafter: "^// --- DYNAMIC \\(VLANS\\) ---$"
+    block: |
+      zone "{{ _bind9_svc_fqdn }}" {
+          type master;
+          file "/etc/bind/zones/{{ _bind9_svc_fqdn }}.zone";
+          allow-update { key {{ svc_tsig_key_name | default('svc-key') }}; };
+          allow-transfer { key {{ svc_tsig_key_name | default('svc-key') }}; };
+          notify yes;
+      };
+    mode: "0644"
+  when: _bv.dns is not defined
+  notify: Restart bind9
+
+- name: "Add_vlan — is this VLAN one Kea serves?"
+  ansible.builtin.set_fact:
+    _bind9_vlan_dynamic: "{{ _bv.dns is not defined }}"
+
+- name: "Add_vlan — register forward + reverse zones in named.conf"
+  ansible.builtin.blockinfile:
+    path: "{{ bind9_config_dir }}/config/named.conf"
+    marker: "// {mark} ANSIBLE MANAGED BLOCK: {{ _bind9_vlan_fqdn }}"
+    insertafter: "^// --- DYNAMIC \\(VLANS\\) ---$"
+    block: |
+      zone "{{ _bind9_vlan_fqdn }}" {
+          type master;
+          file "/etc/bind/zones/{{ _bind9_vlan_fqdn }}.zone";
+          allow-update { {{ ('key ' ~ ddns_tsig_key_name ~ ';') if _bind9_vlan_dynamic else 'none;' }} };
+          notify yes;
+      };
+
+      zone "{{ _bind9_vlan_reverse }}" {
+          type master;
+          file "/etc/bind/zones/rev.{{ _bind9_vlan_fqdn }}.zone";
+          allow-update { {{ ('key ' ~ ddns_tsig_key_name ~ ';') if _bind9_vlan_dynamic else 'none;' }} };
+          notify yes;
+      };
+    mode: "0644"
+  notify: Restart bind9

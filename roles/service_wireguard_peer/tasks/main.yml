@@ -1,0 +1,295 @@
+---
+# Configure ONE END of a WireGuard site-to-site link.
+#
+# THE DESIGN INVARIANT, and the reason there is no ordering gate between the two ends:
+# EACH END'S CONFIGURATION MUST BE SAFE WITH THE OTHER ABSENT. Table=off means no routes are
+# installed from AllowedIPs, so a half-applied link is not a degraded network — it is a completely
+# healthy host with an inert interface. That is why the ends can be configured in either order, and
+# why verify.yml's local checks must pass before the far end exists.
+#
+# Generate-don't-apply: the default run renders the config, validates it, shows the diff, and
+# writes nothing to /etc. wireguard_apply=true installs.
+
+- name: Resolve vars
+  ansible.builtin.include_tasks: _setup_vars.yml
+
+- name: Run the GENERATED argspec guards
+  # Rendered from meta/argument_specs.py — ranges, patterns and lengths that Ansible's own
+  # validator cannot enforce.
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Run the hand-written safety guards
+  # The checks too complex to declare: cross-field relationships and structure.
+  ansible.builtin.include_tasks: _guards.yml
+
+- name: Report what would be configured
+  ansible.builtin.debug:
+    msg:
+      - "host      : {{ inventory_hostname }}"
+      - "interface : {{ wireguard_interface }}  address {{ wireguard_address }}  mtu {{ wireguard_mtu }}"
+      - "listen    : {{ wireguard_listen_port if wireguard_listen_port | int > 0 else '(floating — correct for a NAT-ed initiator)' }}"
+      - "peers     : {{ wireguard_peers | map(attribute='public_key') | map('truncate', 12, true, '…') | list }}"
+      - "allowed   : {{ wireguard_peers | map(attribute='allowed_ips') | list }}"
+      - "nftables  : {{ 'managed' if wireguard_manage_nftables | bool else 'NOT managed (correct for the remote/public end)' }}"
+      - "inbound   : {{ wireguard_inbound_allow | length }} caller-declared flow(s)"
+      - "{{ 'DRY RUN — nothing written. Re-run with wireguard_apply=true.' if not (wireguard_apply | bool) else 'APPLYING.' }}"
+
+- name: Install wireguard-tools
+  ansible.builtin.package:
+    name: wireguard-tools
+    state: present
+  when: wireguard_apply | bool
+
+- name: Ensure the config directory exists
+  ansible.builtin.file:
+    path: "{{ _wg_dir }}"
+    state: directory
+    mode: "0700"
+  vars:
+    _wg_dir: "{{ wireguard_render_dir if wireguard_render_dir | length > 0 else '/etc/wireguard' }}"
+
+- name: Write the private key
+  # Its OWN file, 0600, no_log, never diffed. See the template header for why the key is not in
+  # wg0.conf: generate-don't-apply prints diffs, and a key in the config forces a choice between
+  # killing the diff and leaking the secret.
+  ansible.builtin.copy:
+    content: "{{ wireguard_private_key }}\n"
+    dest: "{{ (wireguard_render_dir if wireguard_render_dir | length > 0 else '/etc/wireguard') }}/{{ wireguard_interface }}.key"
+    mode: "0600"
+  no_log: true
+  when: wireguard_apply | bool or wireguard_render_dir | length > 0
+
+- name: Render the peer configuration
+  ansible.builtin.template:
+    src: wg0.conf.j2
+    dest: "{{ (wireguard_render_dir if wireguard_render_dir | length > 0 else '/etc/wireguard') }}/{{ wireguard_interface }}.conf"
+    mode: "0600"
+  register: _wg_conf
+  diff: true
+
+- name: Is wg-quick available to validate with?
+  # The validation below is a REAL parser check, and real parsers are the strongest thing this
+  # role's tests can do — but wg-quick is not present on every controller (it is not on the macOS
+  # dev machine). Skipping silently would turn a strong check into a fake one, so its absence is
+  # reported LOUDLY instead.
+  ansible.builtin.command:
+    argv: [sh, -c, "command -v wg-quick"]
+  register: _wg_quick_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: WARN — the configuration was NOT validated
+  ansible.builtin.debug:
+    msg: >-
+      wg-quick is NOT available on {{ inventory_hostname }}, so the rendered configuration has NOT
+      been parser-validated. This is expected on a controller that only renders; on a real peer it
+      means wireguard-tools is missing and the interface will not come up.
+  when: _wg_quick_present.rc != 0
+
+- name: Validate the rendered configuration with wg-quick's own parser
+  # A REAL parser, not a regex of our own — `wg-quick strip` fails on anything wg-quick itself
+  # would reject. Catches malformed keys, bad AllowedIPs syntax and unknown directives before the
+  # interface is ever brought up.
+  ansible.builtin.command:
+    argv:
+      - wg-quick
+      - strip
+      - "{{ (wireguard_render_dir if wireguard_render_dir | length > 0 else '/etc/wireguard') }}/{{ wireguard_interface }}.conf"
+  register: _wg_strip
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _wg_quick_present.rc == 0
+
+- name: HARD GATE — the rendered configuration must parse
+  ansible.builtin.assert:
+    that:
+      - "_wg_strip.rc == 0"
+    fail_msg: >-
+      wg-quick refuses to parse the rendered config (rc={{ _wg_strip.rc }}):
+      {{ _wg_strip.stderr | default('') | trim }}
+    success_msg: "Rendered configuration parses cleanly."
+    quiet: true
+  when:
+    - _wg_quick_present.rc == 0
+    - not (_wg_strip is skipped)
+
+- name: Enable IPv4 forwarding
+  # Only where this peer is a GATEWAY for other hosts. Without forwarding, packets arrive at the
+  # gateway peer and are silently discarded — a tunnel with correct keys, correct AllowedIPs and
+  # correct routes that still carries nothing.
+  #
+  # sysctl_set with a persisted file: a runtime-only change is lost at the next reboot, which is
+  # the same class of failure as the unpersisted kernel module.
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-wireguard-forward.conf
+  when:
+    - wireguard_apply | bool
+    - wireguard_forward | bool
+
+- name: Install the nftables policy
+  when:
+    - wireguard_apply | bool
+    - wireguard_manage_nftables | bool
+  block:
+    - name: Ensure the nftables drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        mode: "0755"
+
+    - name: Render the policy
+      ansible.builtin.template:
+        src: nftables-wg.conf.j2
+        dest: /etc/nftables.d/wireguard.conf
+        mode: "0644"
+        validate: "nft -c -f %s"
+      register: _wg_nft
+
+    - name: Ensure nftables.conf INCLUDES the drop-in directory
+      # WITHOUT THIS THE POLICY IS INERT. Debian's stock /etc/nftables.conf has no include
+      # directive, so a file dropped in /etc/nftables.d is never read — the rules exist on disk,
+      # `nft -c` validates them, the play reports success, and nothing is enforced. A firewall rule
+      # that looks present and filters nothing is worse than no rule: it is believed.
+      ansible.builtin.lineinfile:
+        path: /etc/nftables.conf
+        line: 'include "/etc/nftables.d/*.conf"'
+        insertafter: EOF
+        state: present
+      register: _wg_nft_include
+
+    - name: Load the policy now
+      # systemctl reload rather than a bare `nft -f`: it re-reads nftables.conf the same way a boot
+      # would, so what is tested here is what a reboot produces.
+      ansible.builtin.systemd:
+        name: nftables
+        state: reloaded
+        enabled: true
+      when: _wg_nft is changed or _wg_nft_include is changed
+
+    - name: Read the live ruleset back
+      # Proof the rules are LOADED, not merely written. The whole failure mode this guards is a
+      # policy that exists on disk and is never read.
+      ansible.builtin.command:
+        argv: [nft, list, table, inet, wgfilter]
+      register: _wg_nft_live
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: HARD GATE — the policy must be LOADED, not just written
+      ansible.builtin.assert:
+        that:
+          - "_wg_nft_live.rc == 0"
+          - "wireguard_interface in _wg_nft_live.stdout"
+        fail_msg: >-
+          The wgfilter table is not loaded (rc={{ _wg_nft_live.rc }}). The policy was written to
+          /etc/nftables.d/wireguard.conf but nftables is not reading it, so nothing is enforced.
+          Check that /etc/nftables.conf includes /etc/nftables.d/*.conf.
+        success_msg: "nftables policy loaded and enforcing."
+        quiet: true
+
+- name: Bring the interface up
+  # `state: started` is a NO-OP on an already-running unit, so on its own this never applies a
+  # changed config — the file updates and the live interface keeps the old rules. Widen AllowedIPs
+  # and wg0.conf shows the new CIDR, `wg show` shows the old one, and packets route out the default
+  # gateway. Config written but not applied.
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wireguard_interface }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: wireguard_apply | bool
+
+- name: Apply a changed configuration to the RUNNING interface
+  # `wg syncconf` rather than restarting wg-quick: it applies peer/AllowedIPs changes in place
+  # WITHOUT dropping the tunnel. A restart would work but tears the link down — on a remote peer
+  # that is a self-inflicted outage every time a rule is edited.
+  #
+  # `wg-quick strip` removes the wg-quick-only directives (Address, MTU, Table, PostUp) that
+  # `wg syncconf` does not understand. Process substitution needs bash explicitly.
+  #
+  # THE KEY MUST BE RE-SET AFTERWARDS. This role deliberately keeps PrivateKey OUT of wg0.conf
+  # (so generate-don't-apply can print diffs without leaking it) and loads it via PostUp — but
+  # PostUp runs only on interface UP, and `wg syncconf` applies a config that has no key in it.
+  # The result is an interface with NO private key: `wg show` reports none, every handshake fails,
+  # and the config file looks perfect. Setting it back in the same command closes that window.
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: >-
+      wg syncconf {{ wireguard_interface }}
+      <(wg-quick strip {{ _wg_conf_path }})
+      && wg set {{ wireguard_interface }} private-key {{ wireguard_private_key_path }}
+  vars:
+    _wg_conf_path: "/etc/wireguard/{{ wireguard_interface }}.conf"
+  register: _wg_sync
+  changed_when: _wg_sync.rc == 0
+  when:
+    - wireguard_apply | bool
+    # NOT gated on `_wg_conf is changed`. That gate leaves an unreconcilable state: once the file
+    # has been written correctly, a later run sees no change and never syncs — so a config that is
+    # right on disk and wrong in the kernel stays that way forever, and re-running the play cannot
+    # fix it. syncconf is idempotent and cheap; running it every time is what makes the role
+    # CONVERGE rather than merely write.
+
+- name: Route each declared AllowedIP into the tunnel (runtime convergence)
+  # The DURABLE mechanism is PostUp in wg0.conf — see the template. This task exists so a RUNNING
+  # interface picks up a newly-declared CIDR without bouncing the tunnel; PostUp alone would only
+  # take effect at the next interface start.
+  #
+  # Both are needed. PostUp alone leaves a running tunnel unconverged until it restarts; this task
+  # alone is lost at reboot — the tunnel then handshakes perfectly, AllowedIPs is right, and the
+  # route is gone, so traffic silently stops while every tunnel check stays green.
+  #
+  # The interface's OWN subnet is skipped: wg-quick already installs that as a kernel link route.
+  ansible.builtin.command:
+    argv: [ip, route, replace, "{{ item }}", dev, "{{ wireguard_interface }}"]
+  register: _wg_route
+  changed_when: _wg_route.rc == 0
+  loop: >-
+    {{ wireguard_peers | map(attribute='allowed_ips') | flatten
+       | reject('in', [wireguard_address | ansible.utils.ipaddr('subnet')]) | list }}
+  loop_control:
+    label: "{{ item }} -> {{ wireguard_interface }}"
+  when:
+    - wireguard_apply | bool
+    - not (item | ansible.utils.ipaddr(wireguard_address | ansible.utils.ipaddr('subnet')))
+
+- name: HARD GATE — the RUNNING interface must match the declared peers
+  # Read back from the kernel, not the file. The file being right is what misled us; only
+  # `wg show` reports what is actually enforced.
+  ansible.builtin.command:
+    argv: [wg, show, "{{ wireguard_interface }}", allowed-ips]
+  register: _wg_live_allowed
+  changed_when: false
+  check_mode: false
+  when: wireguard_apply | bool
+
+- name: Assert every declared AllowedIP is live
+  ansible.builtin.assert:
+    that:
+      - "wireguard_peers | map(attribute='allowed_ips') | flatten | reject('in', _wg_live_allowed.stdout) | list | length == 0"
+    fail_msg: >-
+      The running interface does not carry every declared AllowedIP. Declared:
+      {{ wireguard_peers | map(attribute='allowed_ips') | flatten | list }}. Live:
+      {{ _wg_live_allowed.stdout | default('') | trim }}. The config file may be correct while the
+      interface is not — packets for a missing CIDR route out the default gateway instead.
+    success_msg: "Running interface matches the declared peers."
+    quiet: true
+  when: wireguard_apply | bool
+
+- name: Verify what was just configured
+  # verify.yml IS main's postcondition — not a separate optional step. Reusing it means the checks
+  # can never drift from what configure claims to have done. transport stays false here: after
+  # configuring ONE end the far end may not exist yet, and asserting a handshake would fail
+  # legitimately, which is exactly when someone reaches for failed_when:false.
+  ansible.builtin.include_tasks: verify.yml
+  vars:
+    wireguard_verify_transport: false
+  when: wireguard_apply | bool

@@ -1,0 +1,53 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/dns_service_registrar/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate dns_service_registrar
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Reconcile a svc.* zone against the services a host runs
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      svc_dns_zone:
+        description: The service zone to reconcile, e.g. svc.lab.vlans.example.com.
+        type: str
+        required: true
+      svc_dns_target:
+        description: The owning host's DDNS-registered FQDN, e.g. app1.lab.vlans.example.com. Every record written points here, and it doubles as the ownership marker that scopes garbage collection in a shared zone.
+        type: str
+        required: true
+      svc_dns_names:
+        description: Service labels this host should have, derived from its traefik routers.
+        type: list
+        required: true
+        elements: str
+      svc_dns_apply:
+        description: "Generate-don't-apply: report the diff unless explicitly true."
+        type: bool
+        required: false
+        default: false
+      svc_dns_ttl:
+        type: int
+        required: false
+        default: 60
+      svc_tsig_key_name:
+        type: str
+        required: false
+        default: svc-key
+      svc_tsig_key_algorithm:
+        type: str
+        required: false
+        default: hmac-sha256
+      svc_tsig_key_secret:
+        description: TSIG key for svc.* zones. From vault; never defaulted.
+        type: str
+        required: true
+      bind9_addr:
+        description: Address of the bind9 server the zone is read from and updated on.
+        type: str
+        required: true

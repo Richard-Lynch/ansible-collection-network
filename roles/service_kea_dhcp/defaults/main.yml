@@ -1,0 +1,105 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_kea_dhcp/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_kea_dhcp
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+kea_dhcp4_image_version__default: 2.5.8
+
+# Host address the Kea control API (port 8000, unauthenticated) is published on. Loopback by default, so only the guest itself can reach it.
+# An empty string publishes it on EVERY interface; a published Docker port bypasses the host firewall, so do that only on a network you trust.
+kea_ctrl_agent_bind_address__default: 127.0.0.1
+kea_dhcp_ddns_image_version__default: 2.5.8
+
+# DHCP host reservations (static leases), rendered into each subnet's
+# `reservations` array. Reserving an address takes it out of the dynamic
+# pool for everyone else — the supported way to pin a host.
+# Normally supplied by kea_reservations, which merges one file per
+# host from a reservations directory and validates the set before this
+# role ever sees it. A caller may also pass a literal list.
+# Defaults to [] rather than being required: a Kea with no reservations is
+# valid (every client leases dynamically).
+kea_reservations__default: []
+
+# Permit deploying with NO reservations at all.
+# An empty reservation set is legitimate but is also exactly what a caller
+# gets by forgetting to merge reservations.d — and the two are
+# indistinguishable from inside this role. The failure is silent: the config
+# renders, `kea-dhcp4 -t` passes, the restart succeeds, and every reserved
+# host renumbers at its next renewal, hours later and far from the play that
+# caused it.
+# So an empty set must be DECLARED rather than arrived at. Leave this false
+# and merge reservations first; set it true only where a Kea genuinely has
+# no reservations.
+kea_reservations_allow_empty__default: false
+
+# Addresses permitted to hold a reservation INSIDE the dynamic pool, by
+# explicit exception.
+# The band guard is right — an in-pool reservation can be leased to another
+# client before the reserving host renews — so exceptions are DECLARED here
+# rather than achieved by deleting the check. Kea does honour in-pool
+# reservations, so the risk is real but bounded, and sometimes an address is
+# load-bearing enough that moving it is the larger risk.
+# Each entry needs a reason recorded next to the reservation itself.
+kea_inpool_reservations_allowed__default: []
+
+# Offset from each subnet's base address where the DYNAMIC pool starts.
+# Default address plan (shown for a /24 whose base is .1):
+#   .1         gateway (router)
+#   .2 - .10   RESERVED BAND — infrastructure statics + DHCP reservations
+#   .11 - .251 dynamic DHCP pool
+# A DHCP reservation whose address falls INSIDE the pool is not safe: Kea
+# can hand that address to another client before the reserving host next
+# renews (it only honours the reservation for the matching MAC). Keeping
+# the band outside the pool makes statics and reservations structurally
+# safe instead of relying on luck. 10 => pool starts at base+10 (.11 when
+# base is .1).
+kea_pool_offset__default: 10
+
+# Re-assert DNS on every renewal (see kea-dhcp4.conf.template.j2 for the
+# full rationale). Kea's own default is false; true makes DDNS self-healing
+# after a dropped NCR.
+kea_ddns_update_on_renew__default: true
+
+# RFC 4703 conflict resolution. EMPTY = Kea's default (check-with-dhcid),
+# which is the normal setting. Set to 'no-check-with-dhcid' ONLY
+# for the duration of a migration cutover, so DDNS can take ownership of a
+# name currently held by a DHCID-less static without a resolution gap.
+# Leaving it set disables conflict checking for every subnet — always clear it
+# afterwards.
+kea_ddns_conflict_mode__default: ''
+
+# Lease lifetime in seconds, pinned rather than inherited from Kea's
+# implicit default.
+kea_valid_lifetime__default: 7200
+
+# T1. Kea's implicit default is 50% of valid-lifetime; pinned so the
+# renewal cadence ddns-update-on-renew depends on is a stated property of
+# the config rather than an inherited accident.
+kea_renew_timer__default: 3600
+
+# T2. Kea's implicit default is 87.5% of valid-lifetime.
+kea_rebind_timer__default: 6300
+
+# Match reservations on MAC alone; ignore the client-identifier option.
+# Safe only where no two hosts share a MAC.
+kea_match_client_id__default: false
+
+# Answer DHCPNAK rather than staying silent when a client REQUESTs an
+# address we will not grant. Kea's default is false = ignore, which turns a
+# renumber into a slow mystery: the client retries its old address, gets
+# nothing, limps to lease expiry and only THEN rediscovers.
+kea_authoritative__default: true
+
+# RELAY-ONLY BY DESIGN. Kea runs in a container behind a port map, so it
+# can never legitimately see a client broadcast — every packet it should
+# serve arrives as relayed unicast from the router with giaddr set.
+kea_socket_type__default: udp
+
+# Container name used by the config-validation and liveness gates.
+kea_container_name__default: kea_dhcp

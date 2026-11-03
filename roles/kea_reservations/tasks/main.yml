@@ -1,0 +1,289 @@
+---
+# Merge one-file-per-host Kea reservations into a single validated list.
+#
+# WHY A DIRECTORY. A single long reservation list in inventory is fine to read, but a host's
+# reservation lives nowhere near the play that provisions that host, so the two drift. Worse, the
+# rationale for each address (the part that cannot be reconstructed later) is buried in a comment
+# block that a merge conflict can silently reorder. One file per owner suits exactly this shape: a
+# consumer that globs a directory, where one caller's mistake must not corrupt everyone else's entry.
+#
+# WHAT THIS ROLE IS NOT. It writes nothing to managed hosts and never touches Kea. It produces a
+# variable — `kea_reservations`, the name service_kea_dhcp already consumes — which that role then
+# renders. The separation is deliberate: service_kea_dhcp stays independently testable, and its four
+# existing band/zone guards keep working unchanged on whatever list they are handed.
+#
+# THE VALIDATION IS THE POINT. A flat list has NO duplicate detection whatsoever. Two entries
+# claiming one address, or one MAC claiming two addresses, render happily into the config; Kea
+# resolves the ambiguity by picking one and nothing anywhere says so. Those are the
+# failures this role exists to make impossible.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Enforce the constraints Ansible cannot
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Find every reservation declaration
+  # `_*.yml` is excluded so a future shared/partial file can live here without being read as a
+  # reservation. `failed_when: false` because an ABSENT directory is a legitimate state (no
+  # declarations yet) and is handled explicitly below — distinct from a malformed one.
+  ansible.builtin.find:
+    paths: "{{ kea_reservations_dir }}"
+    patterns: "*.yml"
+    file_type: file
+    excludes: ["_*.yml"]
+  register: _resv_find
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  failed_when: false
+
+- name: Load each declaration into its own namespace
+  # Deliberately NOT `include_vars: dir=`, which merges every file into the TOP-LEVEL namespace:
+  # each file's keys would overwrite the previous file's, so N declarations would silently collapse
+  # into one. Loading into a named fact keeps each file separate and attributable.
+  #
+  # Sorted by path so the merged order is deterministic — an unstable order makes a diff of the
+  # rendered config noisy and hides real changes among reordered ones.
+  ansible.builtin.include_vars:
+    file: "{{ item.path }}"
+    name: _resv_one
+  loop: "{{ _resv_find.files | default([]) | sort(attribute='path') }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  register: _resv_loaded
+  delegate_to: localhost
+  run_once: true
+
+- name: Reset the accumulator before merging
+  # MUST run before the accumulating loop below. `set_fact` persists for the WHOLE PLAY, so a
+  # second invocation of this role in one play would otherwise append to the FIRST invocation's
+  # list: the same declarations merged twice, which then trips the duplicate-address guard with a
+  # message blaming the files rather than the re-entry. Caught by the molecule scenario, which
+  # calls the role twice deliberately for exactly this reason.
+  #
+  # Same class of bug as the one the generated resolver documents at length for options; it applies
+  # to any fact a role builds up incrementally.
+  ansible.builtin.set_fact:
+    _resv_from_files: []
+  delegate_to: localhost
+  run_once: true
+
+- name: Tag each declaration with the file it came from
+  # `_source_file` is carried through every validation below so a failure message can name the file
+  # to fix. "duplicate address 198.51.100.3" without a filename sends the reader back to grep the
+  # whole directory; with one, the fix is obvious.
+  ansible.builtin.set_fact:
+    _resv_from_files: >-
+      {{ _resv_from_files + [item.ansible_facts._resv_one
+         | combine({'_source_file': item.item.path | basename})] }}
+  loop: "{{ _resv_loaded.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.path | basename }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Combine the directory with any caller-supplied extras
+  # `kea_reservations_extra` exists for migrations: it lets an older inventory list be merged
+  # alongside the per-host files so the two can be proven equivalent BEFORE the old one is deleted.
+  # Extras are validated identically — an escape hatch that skipped validation would be the hole
+  # every future mistake went through.
+  ansible.builtin.set_fact:
+    _resv_all: >-
+      {{ (_resv_from_files | default([]))
+         + (kea_reservations_extra | default([])
+            | map('combine', {'_source_file': '(caller-supplied)'}) | list) }}
+  delegate_to: localhost
+  run_once: true
+
+# ---- VALIDATION ---------------------------------------------------------------------------
+# Every check below names the offending FILE. They run before anything consumes the merged list,
+# so a bad declaration fails the play rather than reaching Kea.
+
+- name: Assert every declaration has the required fields
+  # `hostname` is required HERE though optional in service_kea_dhcp: a file in reservations.d is
+  # named after its host, so a declaration without one is a file whose name and contents disagree.
+  ansible.builtin.assert:
+    that:
+      - r.subnet_id is defined
+      - r.hw_address is defined
+      - r.ip_address is defined
+      - r.hostname is defined
+    fail_msg: >-
+      {{ r._source_file }} is missing a required field. Needs subnet_id, hw_address, ip_address and
+      hostname. Got: {{ r | dict2items | rejectattr('key', 'eq', '_source_file')
+                          | map(attribute='key') | list }}
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+
+- name: Assert every declaration explains why its address must not move
+  # The rationale is the part that cannot be reconstructed later. See the argspec for why this is
+  # on by default.
+  ansible.builtin.assert:
+    that:
+      - r.why is defined
+      - (r.why | default('') | trim | length) >= 10
+    fail_msg: >-
+      {{ r._source_file }} has no usable `why:`. Say what breaks if {{ r.ip_address }} moves —
+      which consumers hardcode it, which port forwards target it, which mount depends on it.
+      An address with no recorded reason is one nobody can safely keep OR remove later.
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+  when: kea_reservations_require_why | bool
+
+- name: Assert the hostname matches the filename
+  # A file named nas.yml declaring hostname `nass` renders a reservation that works but
+  # registers the wrong DDNS name, and the directory listing lies about what is reserved.
+  ansible.builtin.assert:
+    that:
+      - r.hostname == (r._source_file | splitext | first)
+    fail_msg: >-
+      {{ r._source_file }} declares hostname '{{ r.hostname }}', which does not match its filename.
+      Rename the file to '{{ r.hostname }}.yml' or fix the hostname — the directory is the index of
+      what is reserved, so the two must agree.
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+  when: r._source_file != '(caller-supplied)'
+
+- name: Assert every hostname is SHORT, not an FQDN
+  # Kea appends the subnet's ddns-qualifying-suffix, so an FQDN here is double-qualified
+  # ("nas.internal.vlans.example.com.internal.vlans.example.com"). Nothing errors; the name is
+  # simply wrong.
+  ansible.builtin.assert:
+    that:
+      - "'.' not in r.hostname"
+    fail_msg: >-
+      {{ r._source_file }}: hostname '{{ r.hostname }}' looks like an FQDN. Kea appends the
+      subnet's ddns-qualifying-suffix, so this would be double-qualified. Use the short name.
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+
+- name: Assert every MAC is well formed
+  # Enforced here rather than by the argspec: Ansible's validator has no pattern checking, and the
+  # generated guards only cover TOP-LEVEL options — a constraint on a nested list element is not
+  # collected. So a per-element pattern check has to be a real task or it does not exist.
+  ansible.builtin.assert:
+    that:
+      - r.hw_address | regex_search('^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$') is not none
+    fail_msg: >-
+      {{ r._source_file }}: hw_address '{{ r.hw_address }}' is not a colon-separated MAC.
+      Kea matches reservations on MAC alone (match-client-id is false), so a malformed one means
+      this host is never matched and silently leases from the dynamic pool instead.
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+
+- name: Assert every address is a valid IPv4 address
+  ansible.builtin.assert:
+    that:
+      - (r.ip_address | ansible.utils.ipv4) | ternary(true, false)
+    fail_msg: "{{ r._source_file }}: ip_address '{{ r.ip_address }}' is not a valid IPv4 address."
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+
+- name: Assert no two declarations claim the same address or MAC
+  # Both duplicate checks in ONE task, computed in Python-free Jinja that is legible rather than
+  # clever: build the list of keys, compare its length to the length of its unique set, and when
+  # they differ, name the offenders by selecting keys whose occurrence count exceeds one.
+  ansible.builtin.assert:
+    that:
+      - (_ip_keys | length) == (_ip_keys | unique | length)
+      - (_mac_keys | length) == (_mac_keys | unique | length)
+    fail_msg: >-
+      {{ 'Duplicate ADDRESS: ' ~ (_ip_keys | difference(_ip_keys | unique) | unique)
+         if (_ip_keys | length) != (_ip_keys | unique | length) else '' }}
+      {{ 'Duplicate MAC: ' ~ (_mac_keys | difference(_mac_keys | unique) | unique)
+         if (_mac_keys | length) != (_mac_keys | unique | length) else '' }}
+      Declarations: {{ _resv_all | map(attribute='_source_file') | list }}.
+      Two declarations cannot claim one address (Kea honours only one; the loser silently falls
+      back to the dynamic pool) and one MAC cannot hold two reservations (match-client-id is false,
+      so one MAC means one lease).
+    success_msg: >-
+      {{ _resv_all | length }} declaration(s): no duplicate addresses, no duplicate MACs.
+    quiet: true
+  vars:
+    # subnet-scoped: the same host address on two different VLANs is legitimate.
+    _ip_keys: >-
+      {{ _resv_all | map(attribute='subnet_id') | map('string')
+         | zip(_resv_all | map(attribute='ip_address')) | map('join', '/') | list }}
+    # MACs are globally unique, so NOT subnet-scoped. Lowercased: the same MAC written in two cases
+    # is the same NIC, and a case-sensitive compare would miss it.
+    _mac_keys: "{{ _resv_all | map(attribute='hw_address') | map('lower') | list }}"
+
+- name: Assert every subnet_id is one Kea actually serves
+  # A reservation whose subnet_id matches no VLAN renders NOWHERE: the template filters per subnet
+  # with selectattr('subnet_id','equalto', vlan.id), so the entry is silently dropped and the host
+  # keeps leasing dynamically. Checked only when the caller has kea_vlans in scope — a play that
+  # merges reservations without deploying Kea legitimately does not.
+  ansible.builtin.assert:
+    that:
+      - r.subnet_id in (kea_vlans | map(attribute='id') | list)
+    fail_msg: >-
+      {{ r._source_file }}: subnet_id {{ r.subnet_id }} is not a VLAN Kea serves
+      ({{ kea_vlans | map(attribute='id') | list }}). The reservation would render NOWHERE and
+      {{ r.hostname }} would keep leasing from the dynamic pool, with nothing reporting an error.
+      A VLAN is Kea-served only when its VLAN entry has NO `dns:` key.
+    quiet: true
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+  when: kea_vlans is defined
+
+- name: Assert every address sits inside its own subnet
+  ansible.builtin.assert:
+    that:
+      - r.ip_address | ansible.utils.ipaddr(_sub.base ~ '/' ~ _sub.cidr) | ternary(true, false)
+    fail_msg: >-
+      {{ r._source_file }}: {{ r.ip_address }} is not inside subnet {{ r.subnet_id }}
+      ({{ _sub.base }}/{{ _sub.cidr }}).
+    quiet: true
+  vars:
+    _sub: "{{ kea_vlans | selectattr('id', 'equalto', r.subnet_id) | first }}"
+  loop: "{{ _resv_all }}"
+  loop_control:
+    loop_var: r
+    label: "{{ r._source_file }}"
+  when: kea_vlans is defined
+
+- name: Publish the merged, validated set
+  # Published under the name service_kea_dhcp already consumes, so a caller includes this role and
+  # then that one with no wiring in between. `_kea_reservations_all` is the same list under an
+  # unambiguous name, for callers (and asserts) that want to be explicit about provenance.
+  #
+  # The `_source_file` tag is STRIPPED here: it is validation metadata, and the kea argspec
+  # declares the element options, so an undeclared extra key would be rejected by
+  # validate_argument_spec on the way into the role.
+  ansible.builtin.set_fact:
+    kea_reservations: >-
+      {{ _resv_all | map('dict2items') | map('rejectattr', 'key', 'in', ['_source_file', 'why'])
+         | map('items2dict') | list }}
+    _kea_reservations_all: >-
+      {{ _resv_all | map('dict2items') | map('rejectattr', 'key', 'in', ['_source_file', 'why'])
+         | map('items2dict') | list }}
+    _kea_reservations_annotated: "{{ _resv_all }}"
+
+- name: Report what was merged
+  ansible.builtin.debug:
+    msg: >-
+      {{ kea_reservations | length }} reservation(s) merged from
+      {{ _resv_find.files | default([]) | length }} file(s) in {{ kea_reservations_dir }}
+      {{ '+ ' ~ (kea_reservations_extra | length) ~ ' caller-supplied' if (kea_reservations_extra | default([]) | length) > 0 else '' }}:
+      {{ _resv_all | map(attribute='hostname') | sort | list }}

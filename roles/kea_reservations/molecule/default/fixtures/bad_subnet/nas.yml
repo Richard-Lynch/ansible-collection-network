@@ -1,0 +1,8 @@
+---
+subnet_id: 99
+hw_address: "02:00:5E:10:00:02"
+ip_address: "198.51.100.3"
+hostname: "nas"
+why: >-
+  Storage target address, configured by IP on the hosts that mount it. If it moves the target
+  disappears and every consumer loses its data volume.

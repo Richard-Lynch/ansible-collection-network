@@ -1,0 +1,26 @@
+---
+# ENTRYPOINT: take networks OUT of relay mode, optionally re-enabling the UDM's own DHCP server.
+#
+#   - ansible.builtin.include_role:
+#       name: unifi_network_dhcp
+#       tasks_from: relay_off
+#     vars:
+#       unifi_network_dhcp_networks:
+#         - { vlan: 200, dhcpd_enabled: true }
+#
+# THE ASYMMETRY IS REAL AND LOAD-BEARING. Disabling relay applies ATOMICALLY alongside other
+# fields — proven by experiment (see the role header): `{dhcpd_enabled: true,
+# dhcp_relay_enabled: false}` was applied as one change. The controller validates on ENABLING
+# relay, not on disabling it.
+#
+# So this entrypoint deliberately accepts co-travelling fields where relay_on refuses them. That is
+# not an inconsistency to tidy away: it is what makes the documented rollback
+# (`{vlan, dhcpd_enabled: true, dhcp_relay_enabled: false}` in one PUT) a single call rather than a
+# two-step dance through a window where the VLAN has no DHCP server at all.
+
+- name: Clear the relay flag, with any co-travelling settings
+  ansible.builtin.include_tasks: _apply.yml
+  vars:
+    _unifi_requests: >-
+      {{ unifi_network_dhcp_networks | default([])
+         | map('combine', {'dhcp_relay_enabled': false}) | list }}

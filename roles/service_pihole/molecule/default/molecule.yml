@@ -1,0 +1,28 @@
+# Offline scenario — renders the pihole compose + adlists (no docker) and asserts coherence.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # BOTH collection trees, mirroring ansible.cfg's `collections_path = collections.galaxy:./collections`.
+  #
+  # Molecule does NOT inherit ansible.cfg's collections_path, so a scenario using a collection
+  # filter works locally (ansible.cfg is honoured) and dies on CI with "No filter named
+  # 'community.general.dict_kv'" — blaming the ROLE for what is a harness path problem. The
+  # vendored community.* collections live in collections.galaxy/; the repo's own my.utils lives in
+  # collections/. Both are needed.
+  env:
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

@@ -1,0 +1,89 @@
+---
+# Read the svc zone's CURRENT contents via a TSIG'd zone transfer.
+#
+# AXFR rather than reading the zone file: once a zone is dynamic, bind9 keeps changes in the .jnl
+# journal until a periodic dump merges them, so the file lags reality and a successful change can
+# read as a failure. The running server is the only source of truth.
+
+- name: Read zone — write the TSIG keyfile
+  # template, not copy-with-inline-content: a copy dumps its full module args (secret included) at
+  # -vvv. diff:false closes --diff as well.
+  # Failures, rc and stderr all stay visible — this hides the secret, not the diagnostics.
+  ansible.builtin.template:
+    src: tsig-key.conf.j2
+    dest: "{{ _svc_keyfile }}"
+    mode: "0600"
+  diff: false
+  vars:
+    # The shared template uses neutral names so the same file serves both keys; map the role's
+    # svc_* variables onto them here.
+    tsig_key_name: "{{ svc_tsig_key_name }}"
+    tsig_key_algorithm: "{{ svc_tsig_key_algorithm }}"
+    tsig_key_secret: "{{ svc_tsig_key_secret }}"
+
+- name: Read zone — AXFR the svc zone
+  ansible.builtin.command:
+    cmd: "dig -k {{ _svc_keyfile }} @{{ bind9_addr }} {{ svc_dns_zone }} AXFR +noall +answer +time=5 +tries=2"
+  register: _svc_axfr
+  changed_when: false
+  failed_when: false
+
+- name: HARD GATE — the transfer must have worked
+  # An empty or refused AXFR read as "the zone is empty" would make the next step delete nothing
+  # and add everything — plausible-looking output from a failed read.
+  ansible.builtin.assert:
+    that:
+      - _svc_axfr.rc == 0
+      - not (_svc_axfr.stdout is search('^;;'))
+      - _svc_axfr.stdout is search('SOA')
+    fail_msg: >-
+      AXFR of {{ svc_dns_zone }} failed (rc={{ _svc_axfr.rc }}):
+      {{ _svc_axfr.stderr | default('') | trim }}{{ _svc_axfr.stdout | default('') | trim | truncate(200) }}.
+      A REFUSED here means allow-transfer does not admit this key. Refusing to reconcile against an
+      unread zone — that would delete nothing and re-add everything.
+    success_msg: "Zone transferred."
+    quiet: true
+
+- name: Read zone — parse the CNAMEs
+  ansible.builtin.set_fact:
+    svc_dns_current: >-
+      {{ _svc_axfr.stdout_lines | default([])
+         | select('search', '\sIN\sCNAME\s') | list
+         | map('regex_replace',
+               '^([^.\s]+)\.' ~ (svc_dns_zone | regex_escape) ~ '\.\s+\d+\s+IN\s+CNAME\s+(\S+?)\.?$',
+               '\1|\2')
+         | map('split', '|') | list
+         | map('zip', ['name', 'target']) | list }}
+
+- name: Read zone — normalise into dicts
+  ansible.builtin.set_fact:
+    svc_dns_current: >-
+      {{ svc_dns_current | map('map', 'reverse') | map('community.general.dict') | list }}
+
+- name: Read zone — nothing but CNAMEs may live below the apex
+  # A svc zone contains service CNAMEs and nothing else, by construction: Kea cannot write here
+  # (wrong key, wrong zone, no ddns-domain) and humans must not (by design). So any other record
+  # type below the apex is drift — a zero-false-positive signal worth stopping on rather than
+  # writing over.
+  #
+  # EXCEPT `dns`, which the bind9 role's zone template writes into EVERY zone it creates as the
+  # nameserver's own A record. That is zone scaffolding, present before any writer touches the
+  # zone, not drift. Excluding it by name rather than loosening the check to "ignore A records",
+  # which would blind the guard to the thing it exists to catch.
+  ansible.builtin.set_fact:
+    _svc_nonc: >-
+      {{ _svc_axfr.stdout_lines | default([])
+         | select('search', '\sIN\s(A|AAAA|TXT|DHCID|MX|SRV)\s')
+         | reject('match', '^dns\.' ~ (svc_dns_zone | regex_escape) ~ '\.')
+         | list }}
+
+- name: HARD GATE — no non-CNAME records in a svc zone
+  ansible.builtin.assert:
+    that:
+      - (_svc_nonc | length) == 0
+    fail_msg: >-
+      {{ svc_dns_zone }} contains non-CNAME records, which should be impossible:
+      {{ _svc_nonc }}. Investigate before reconciling — something other than this registrar has
+      written to the zone.
+    success_msg: "Zone contains only CNAMEs, as expected."
+    quiet: true

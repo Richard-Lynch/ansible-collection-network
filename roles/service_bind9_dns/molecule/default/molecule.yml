@@ -1,0 +1,29 @@
+# Two halves. (1) Offline: renders the bind9 config to a temp dir and asserts it is coherent
+# (forward-only vs authoritative-only options, the port-publish shapes). (2) LIVE: the
+# record task interface against a real bind9 (the role's pinned image, docker compose on
+# 127.0.0.1:15353) with a static and a dynamic zone, present and absent, run twice (idempotence).
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # Molecule runs from the scenario directory, so the repo's ansible.cfg roles_path (./roles) does
+  # not apply: the live half includes this role by name, so point at the roles directory.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+    cleanup: cleanup.yml
+verifier:
+  name: ansible

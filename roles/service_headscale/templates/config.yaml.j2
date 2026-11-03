@@ -1,0 +1,96 @@
+# Rendered by roles/service_headscale — do not edit on the host; the next converge overwrites it.
+# Format: Headscale {{ headscale_image.split(':')[-1] }} (config-example.yaml at that tag).
+---
+server_url: https://{{ headscale_server_hostname }}{{ '' if headscale_server_port == 443 else ':' ~ headscale_server_port }}
+# Plain HTTP on loopback — traefik terminates TLS in front. Headscale logs
+# "listening without TLS but ServerURL does not start with http://" at startup; that is expected.
+listen_addr: 127.0.0.1:{{ headscale_listen_port }}
+metrics_listen_addr: 127.0.0.1:{{ headscale_metrics_port }}
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+# traefik connects from loopback; honour its X-Forwarded-For so logs show the real client.
+trusted_proxies:
+  - 127.0.0.1/32
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: {{ headscale_ipv4_prefix }}
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    # Our own relay. Its port is derived from server_url (above), so it is served through traefik
+    # on the same HTTPS port; STUN is the only extra listener and must be reachable directly.
+    enabled: true
+    region_id: 999
+    region_code: "{{ headscale_derp_region_code }}"
+    region_name: "{{ headscale_derp_region_name }}"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:{{ headscale_stun_port }}"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: {{ headscale_public_ipv4 }}
+  # Tailscale's public relays stay in the map as the fallback when ours is unreachable.
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 3h
+
+disable_check_updates: true
+
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+tls_cert_path: ""
+tls_key_path: ""
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.json
+
+dns:
+  magic_dns: true
+  base_domain: {{ headscale_base_domain }}
+  # false: clients keep their own resolver for everything outside the split domains, so a dead
+  # subnet router breaks the split names only — not the client's whole internet.
+  override_local_dns: false
+  nameservers:
+    global: []
+    split:
+{% if headscale_split_dns | length == 0 %}
+      {}
+{% else %}
+{% for domain, resolvers in headscale_split_dns | dictsort %}
+      {{ domain }}:
+{% for r in resolvers %}
+        - {{ r }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false
+
+taildrop:
+  enabled: true

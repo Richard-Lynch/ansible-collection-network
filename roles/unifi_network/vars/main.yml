@@ -1,0 +1,2 @@
+---
+_unifi_network_base: "https://{{ unifi_network_host }}/proxy/network/api/s/{{ unifi_network_site }}"

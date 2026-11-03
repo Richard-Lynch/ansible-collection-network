@@ -1,0 +1,107 @@
+---
+# Reconcile per-network DHCP settings on the UniFi controller.
+#
+# ############################################################################################
+# CRITICAL, PROVEN BY EXPERIMENT: `dhcp_relay_enabled: true` IS ONLY ACCEPTED WHEN
+# IT IS THE ONLY THING CHANGING IN THE OBJECT.
+#
+# Send it alongside any other change — most obviously the `dhcpd_enabled: false` it logically
+# pairs with — and the controller returns HTTP 200 with rc:ok, applies every OTHER field, and
+# SILENTLY DROPS THE RELAY FLAG. The result is a network with serving off and relay off: no
+# DHCP server at all. There is no error to catch; only a read-back reveals it.
+#
+# Evidence (measured on a VLAN with no clients, so being wrong was cheap):
+#   {dhcpd_enabled: true,  dhcp_relay_enabled: false}          -> applied atomically
+#   {dhcpd_enabled: false, dhcp_relay_enabled: true, servers}  -> relay flag dropped
+#   two sequential PUTs (relay on, then serving off)           -> relay flag dropped
+#   relay flag ALONE on an otherwise-unchanged object          -> APPLIED
+#
+# Note the asymmetry: relay->server applies atomically; only server->relay needs isolation.
+# Consistent with validation that runs on ENABLING relay and not on disabling it. An earlier
+# theory — that the controller rejects a relay target inside the network's own subnet — was
+# disproved: the failing test used an OFF-subnet target and failed identically.
+#
+# SO, TO PUT A NETWORK INTO RELAY MODE:
+#   1. PUT {dhcpd_enabled: false}            <- the network now has NO DHCP; keep this short
+#   2. read back and confirm
+#   3. PUT the full live object with ONLY dhcp_relay_enabled changed
+#   4. read back and confirm BOTH flags
+#   5. prove it with a real DHCP client on that VLAN before trusting it
+#
+# Callers must NOT pass dhcpd_enabled and dhcp_relay_enabled in one call expecting both to
+# apply. This role asserts against that below rather than letting it fail silently.
+#
+# A FIXED BUG WORTH REMEMBERING: `dhcp_relay_enabled` was once documented in the argspec and
+# guarded by the gate above, but NEVER MERGED INTO `_wanted` — so the role computed "NO CHANGE" for
+# every relay-flag request and silently did nothing, and its callers ended up with no DHCP server
+# at all. It looked supported from every angle except the one that mattered; molecule now asserts
+# the merged object carries the flag.
+# ############################################################################################
+#
+# The UniFi REST API replaces the WHOLE network object on PUT, so this role always GETs the live
+# object first, merges only the requested keys into it, and PUTs the result back. Never construct a
+# network object from scratch — you would silently drop every setting you did not think to include.
+
+# ############################################################################################
+# ENTRYPOINTS. This role does not take every field in one call and police the
+# combinations at runtime. The controller's contract is a small set of legal request shapes, so
+# each shape gets its own entrypoint and validates only its own input:
+#
+#   tasks_from: relay_on    {vlan}                      sets the flag ALONE. Callers cannot pass
+#                                                       co-travelling fields, so the broken
+#                                                       request is unrepresentable.
+#   tasks_from: relay_off   {vlan, +any settings}       clears it; may carry other fields, because
+#                                                       relay->server applies atomically.
+#   tasks_from: settings    {vlan, +any non-flag field} dhcpd/range/leasetime/dns/relay_servers.
+#
+# All three include tasks/_apply.yml, the shared engine (fetch live -> merge -> PUT -> read back).
+#
+# WHY NOT ONE ENTRYPOINT WITH A RUNTIME UNION: the previous gate counted keys and allowed
+# `length <= 3`, which permits exactly {vlan, dhcp_relay_enabled, dhcp_relay_servers} — the one
+# shape the controller mishandles, so networks configured through it ended up with no DHCP
+# server. A runtime check can be wrong; an input shape that cannot express the bad request
+# cannot.
+#
+# This file is a DISPATCHER kept for backward compatibility with callers that pass
+# `dhcp_relay_enabled` inline. New callers should use tasks_from: directly.
+# ############################################################################################
+
+- name: Resolve declared options over their generated defaults
+  # GENERATED from meta/argument_specs.py — binds every declared option to its default, so a
+  # default can never be declared-but-dead (the variable evaluating Undefined at run time).
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Resolve the caller's request list once
+  ansible.builtin.set_fact:
+    _all: "{{ unifi_network_dhcp_networks | default([]) }}"
+
+- name: Dispatch — networks that only change settings
+  ansible.builtin.include_tasks: settings.yml
+  vars:
+    unifi_network_dhcp_networks: >-
+      {{ _all | rejectattr('dhcp_relay_enabled', 'defined') | list }}
+  when: (_all | rejectattr('dhcp_relay_enabled', 'defined') | list | length) > 0
+
+- name: Dispatch — networks turning relay ON
+  # Only `vlan` is forwarded: relay_on refuses anything else by design, and a caller that passed
+  # extra fields alongside the flag was expressing the broken request. Those fields must be applied
+  # in their own settings call first — which the dispatcher above has just done.
+  ansible.builtin.include_tasks: relay_on.yml
+  vars:
+    unifi_network_dhcp_networks: >-
+      {{ _all | selectattr('dhcp_relay_enabled', 'defined')
+              | selectattr('dhcp_relay_enabled')
+              | map(attribute='vlan') | map('community.general.dict_kv', 'vlan') | list }}
+  when: >-
+    (_all | selectattr('dhcp_relay_enabled', 'defined')
+          | selectattr('dhcp_relay_enabled') | list | length) > 0
+
+- name: Dispatch — networks turning relay OFF
+  ansible.builtin.include_tasks: relay_off.yml
+  vars:
+    unifi_network_dhcp_networks: >-
+      {{ _all | selectattr('dhcp_relay_enabled', 'defined')
+              | rejectattr('dhcp_relay_enabled') | list }}
+  when: >-
+    (_all | selectattr('dhcp_relay_enabled', 'defined')
+          | rejectattr('dhcp_relay_enabled') | list | length) > 0

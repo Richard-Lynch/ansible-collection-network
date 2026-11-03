@@ -1,0 +1,7 @@
+---
+subnet_id: 40
+hw_address: "BC:24:11:99:99:99"
+ip_address: "198.51.100.3"
+hostname: "clashing"
+why: >-
+  Deliberately collides with nas to prove the duplicate-address guard fires.

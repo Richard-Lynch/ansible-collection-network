@@ -1,0 +1,32 @@
+# Parse/check tier. A kernel module, netlink, sysctl and routing
+# cannot converge in a container, so this scenario does NOT bring an interface up.
+#
+# What it DOES do is call the REAL role with wireguard_apply=false and a render-dir seam, then
+# assert on the actual rendered artifacts and on the guards' behaviour — rather than re-deriving the
+# role's own expressions over a hand-typed stub, which would be a tautology.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  # The scenario CALLS the role, so the roles directory must be on the search path.
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # BOTH trees, mirroring ansible.cfg's `collections_path = collections.galaxy:./collections`.
+    # Every vendored collection (ansible.posix, community.general, ...) lives in collections.galaxy/;
+    # only the repo's own my.utils lives in collections/. Pointing at just the latter resolves
+    # NOTHING vendored, and the failure is CI-only because a dev venv bundles them in site-packages.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

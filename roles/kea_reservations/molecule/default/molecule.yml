@@ -1,0 +1,39 @@
+# Offline scenario — merges reservation fixtures and proves every guard both PASSES on good input
+# and FAILS on bad. No docker, no network access.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+  env:
+    # Molecule runs from inside the role dir, so the repo's roles/ is not on the search path.
+    # Setting it is what lets the scenario call the REAL role instead of reproducing its effects —
+    # the latter is a tautological test that checks a copy against itself.
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    # BOTH collection trees, mirroring ansible.cfg. Without this the scenario PASSES LOCALLY AND
+    # FAILS ON CI with no local signal: a venv installed from the `ansible` package bundles the
+    # collections inside site-packages, so `ansible.utils.ipv4` resolves here regardless, while CI
+    # installs them where molecule does not look — and running from inside the role directory means
+    # the repo-root ansible.cfg is not read either. Flagged by MOLCOLL-01.
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+verifier:
+  name: ansible
+scenario:
+  # No idempotence step: the role writes nothing (it only sets facts), so there is no state for a
+  # second run to converge onto. Re-entrancy IS covered — converge calls the role twice, the second
+  # time with kea_reservations_extra, which exercises the resolver's repeat-call branch.
+  test_sequence:
+    - syntax
+    - converge
+    - verify

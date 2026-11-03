@@ -1,0 +1,6 @@
+---
+# service_bind9_dns internal vars. The VLAN model is read from the caller's `vlans` dict (inventory);
+# forward + reverse zone names are DERIVED cleanly in the tasks/templates
+# (fqdn = <name>.<domain_name>; reverse = first-3-octets-of-base reversed + .in-addr.arpa) so the
+# drift-prone hand-set fqdn/zone fields aren't relied on.
+bind9_files: "{{ role_path }}/files"

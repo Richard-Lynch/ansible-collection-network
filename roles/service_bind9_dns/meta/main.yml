@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Authoritative BIND 9 DNS in a container: zones rendered from data, a resolver that forwards to
+    an upstream, TSIG keys for dynamic updates, validated with named-checkconf and named-checkzone
+    before every reload.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [dns, bind, bind9, networking]
+dependencies: []

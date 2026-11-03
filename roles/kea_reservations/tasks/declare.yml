@@ -1,0 +1,189 @@
+---
+# ENTRYPOINT: write ONE validated reservation declaration into reservations.d.
+#
+# WHAT THIS DOES: writes a file. Nothing else.
+#
+# WHAT IT DOES NOT DO: deploy. Writing the file changes nothing on any host — Kea learns about
+# a reservation only when service_kea_dhcp renders it into the config and restarts. So the sequence
+# for a new host is: declare -> review -> commit -> deploy -> and only THEN does assert_reserved
+# pass.
+#
+# WHY IT DOES NOT SATISFY THE GATE IN THE SAME RUN. `declare` followed immediately by
+# `assert_reserved` would be a check that cannot fail on Stage 1 (the file was just written) while
+# still failing Stage 2 (nothing deployed) — a confusing way to fail rather than a guarantee. The
+# deploy has to sit between them, which is why a provisioning play should run service_kea_dhcp on
+# the DHCP host before gating.
+#
+# It validates BEFORE writing, so a file that would be rejected by the merge cannot be scaffolded
+# in the first place. And it REFUSES to overwrite a differing file: a provisioning play re-run
+# must never silently rewrite a reservation someone edited by hand.
+#
+# GENERATE-DON'T-APPLY: reports what it would write and changes nothing unless
+# reservation_declare_apply=true.
+
+- name: Load THIS ENTRYPOINT's generated defaults
+  # Ansible auto-loads defaults/main.yml ONLY. The generator writes one defaults file per
+  # entrypoint, so `reservation_declare_apply` lives in defaults/declare.yml and is
+  # INVISIBLE to a plain role call. The generated resolver guards each binding with
+  # `if <name>__default is defined`, so without this the options silently resolve to `omit`
+  # instead of their declared defaults — the declared default would be decorative, and
+  # `reservation_declare_apply` would read as unset rather than as its documented value.
+  #
+  # Loading the entrypoint's own defaults file first makes the declared defaults real.
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/defaults/declare.yml"
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Enforce the constraints Ansible cannot
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Validate the requested declaration
+  # Every check the merge would later apply, applied HERE — so the failure names the input the
+  # caller just supplied rather than surfacing three steps later as "some file in the directory is
+  # malformed".
+  ansible.builtin.assert:
+    that:
+      - "'.' not in reservation_host"
+      - reservation_mac | regex_search('^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$') is not none
+      - (reservation_ip | ansible.utils.ipv4) | ternary(true, false)
+      - (reservation_why | trim | length) >= 10
+    fail_msg: >-
+      Invalid reservation input.
+      host='{{ reservation_host }}' (must be a SHORT name — Kea appends the subnet's ddns suffix),
+      mac='{{ reservation_mac }}' (must be colon-separated),
+      ip='{{ reservation_ip }}' (must be a valid IPv4 address),
+      why='{{ reservation_why | default("") }}' (must say what breaks if the address moves).
+    quiet: true
+
+- name: Validate against the subnet, when kea_vlans is in scope
+  # Skipped where the caller has no VLAN data — a provisioning play may legitimately not load
+  # the inventory's VLAN map. The merge re-checks this anyway, so nothing is lost; it is checked here
+  # only to fail EARLY, next to the input.
+  ansible.builtin.assert:
+    that:
+      - reservation_subnet | int in (kea_vlans | map(attribute='id') | list)
+      - reservation_ip | ansible.utils.ipaddr(_sub.base ~ '/' ~ _sub.cidr) | ternary(true, false)
+      - (reservation_ip | ansible.utils.ipaddr('int')) > (_sub.base | ansible.utils.ipaddr('int'))
+      - (reservation_ip | ansible.utils.ipaddr('int')) <= (_band_end | ansible.utils.ipaddr('int'))
+    fail_msg: >-
+      {{ reservation_ip }} is not usable for subnet {{ reservation_subnet }}.
+      {{ 'That VLAN is not one Kea serves (' ~ (kea_vlans | map(attribute="id") | list) ~ ') — a
+         VLAN is Kea-served only when it has NO `dns:` key.'
+         if (reservation_subnet | int) not in (kea_vlans | map(attribute='id') | list)
+         else 'It must sit inside ' ~ _sub.base ~ '/' ~ _sub.cidr ~ ' and within the reserved band '
+              ~ (_sub.base | ansible.utils.ipmath(1)) ~ ' .. ' ~ _band_end ~ '. Addresses at or
+              above ' ~ (_sub.base | ansible.utils.ipmath(kea_pool_offset | default(10))) ~ ' are
+              inside the dynamic pool and can be leased to another client before this host
+              renews.' }}
+    quiet: true
+  vars:
+    _sub: "{{ kea_vlans | selectattr('id', 'equalto', reservation_subnet | int) | first }}"
+    _band_end: >-
+      {{ (_sub.base ~ '/' ~ _sub.cidr) | ansible.utils.ipmath((kea_pool_offset | default(10)) - 1) }}
+  when:
+    - kea_vlans is defined
+    - (reservation_subnet | int) in (kea_vlans | map(attribute='id') | list)
+
+- name: Fail clearly when the subnet is not one Kea serves
+  # Split from the assert above because that one's `when:` excludes this case — otherwise an
+  # unknown subnet would SKIP the whole check and scaffold a file that renders nowhere. A guard
+  # that skips on bad input is the silent-guard shape this repo bans.
+  ansible.builtin.fail:
+    msg: >-
+      subnet {{ reservation_subnet }} is not a VLAN Kea serves
+      ({{ kea_vlans | map(attribute='id') | list }}). A reservation there would render NOWHERE and
+      {{ reservation_host }} would keep leasing dynamically, with nothing reporting an error.
+      A VLAN is Kea-served only when its VLAN entry has NO `dns:` key.
+  when:
+    - kea_vlans is defined
+    - (reservation_subnet | int) not in (kea_vlans | map(attribute='id') | list)
+
+- name: Build the declaration
+  ansible.builtin.set_fact:
+    _declare_path: "{{ kea_reservations_dir }}/{{ reservation_host }}.yml"
+    _declare_body: |
+      ---
+      # DHCP reservation for {{ reservation_host }}.
+      #
+      # Merged into kea_reservations by kea_reservations and rendered by service_kea_dhcp.
+      # Changing an address here MOVES A LIVE HOST at its next renewal — read `why` first.
+      subnet_id: {{ reservation_subnet }}
+      hw_address: "{{ reservation_mac | upper }}"
+      ip_address: "{{ reservation_ip }}"
+      hostname: "{{ reservation_host }}"
+      why: >-
+        {{ reservation_why | trim }}
+
+- name: Check whether a declaration already exists
+  ansible.builtin.stat:
+    path: "{{ _declare_path }}"
+  register: _declare_stat
+  delegate_to: localhost
+  changed_when: false
+
+- name: Read the existing declaration, if any
+  ansible.builtin.slurp:
+    src: "{{ _declare_path }}"
+  register: _declare_existing
+  delegate_to: localhost
+  when: _declare_stat.stat.exists
+
+- name: HARD GATE — refuse to overwrite a DIFFERENT existing declaration
+  # Compared on the PARSED content, not the raw bytes: a comment edit or a reflowed `why` is not a
+  # change to the reservation, and failing on one would make the guard noise that people route
+  # around. A changed address, MAC or subnet IS a change, and must be a deliberate edit rather than
+  # a side effect of re-running a provisioning play.
+  ansible.builtin.assert:
+    that:
+      - _existing.subnet_id | default('') | string == reservation_subnet | string
+      - (_existing.hw_address | default('') | lower) == (reservation_mac | lower)
+      - _existing.ip_address | default('') == reservation_ip
+    fail_msg: >-
+      {{ reservation_host }}.yml ALREADY EXISTS and declares something different:
+      existing = {{ _existing.ip_address | default('?') }} / {{ _existing.hw_address | default('?') }}
+      on subnet {{ _existing.subnet_id | default('?') }};
+      requested = {{ reservation_ip }} / {{ reservation_mac }} on subnet {{ reservation_subnet }}.
+      REFUSING to overwrite — if the host really is being re-addressed, edit the file deliberately
+      (and check what depends on the old address first: `why` records it).
+    success_msg: "{{ reservation_host }}.yml already exists and matches; nothing to do."
+    quiet: true
+  vars:
+    _existing: "{{ _declare_existing.content | b64decode | from_yaml }}"
+  when: _declare_stat.stat.exists
+
+- name: PREVIEW — report what would be written
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'WOULD WRITE' if not (reservation_declare_apply | bool) else 'WRITING' }}
+      {{ _declare_path }}:
+      {{ reservation_host }} -> {{ reservation_ip }} ({{ reservation_mac | upper }})
+      on subnet {{ reservation_subnet }}.
+      {{ 'Re-run with reservation_declare_apply=true to write it.'
+         if not (reservation_declare_apply | bool) else '' }}
+  when: not _declare_stat.stat.exists
+
+- name: Write the declaration
+  ansible.builtin.copy:
+    content: "{{ _declare_body }}"
+    dest: "{{ _declare_path }}"
+    mode: "0644"
+  delegate_to: localhost
+  when:
+    - reservation_declare_apply | bool
+    - not _declare_stat.stat.exists
+
+- name: Report the next steps, which are NOT automatic
+  # Said explicitly because writing the file is the small half. An untracked file that never
+  # reaches Kea is the original failure in miniature, and a run that ends "changed=1" reads like
+  # the job is done.
+  ansible.builtin.debug:
+    msg:
+      - "Declared {{ reservation_host }} -> {{ reservation_ip }} in {{ _declare_path | basename }}."
+      - "NOT YET LIVE. Kea does not know about this until the config is rendered and reloaded."
+      - "Next: 1) review and COMMIT the file (a reservation that never reaches version control is the failure mode this whole directory exists to prevent); 2) deploy it — run the play that applies service_kea_dhcp,
+        or let the provisioning play's DHCP-host step do it; 3) assert_reserved will then pass its live check."
+  when:
+    - reservation_declare_apply | bool
+    - not _declare_stat.stat.exists

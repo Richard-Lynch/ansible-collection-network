@@ -1,0 +1,18 @@
+---
+# GENERATED from roles/config_vlan_probe/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate config_vlan_probe
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — config_vlan_probe_relay_rate must be >= 1; <= 1000"
+  ansible.builtin.assert:
+    that:
+      - "config_vlan_probe_relay_rate | int >= 1"
+      - "config_vlan_probe_relay_rate | int <= 1000"
+    fail_msg: "config_vlan_probe_relay_rate violates a constraint declared in meta/argument_specs.py: must be >= 1; <= 1000. Got: {{ config_vlan_probe_relay_rate | default('(unset)') }}"
+    quiet: true
+  when: config_vlan_probe_relay_rate is defined

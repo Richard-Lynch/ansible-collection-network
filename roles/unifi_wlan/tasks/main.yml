@@ -1,0 +1,230 @@
+---
+# Create or update a WLAN (SSID) on the UniFi controller.
+#
+# THE UNIFI REST API REPLACES THE WHOLE OBJECT ON PUT. So this role, exactly like
+# unifi_network_dhcp, always GETs the live object first and merges only the requested keys into it.
+# Never build a WLAN object from scratch — you would silently drop every field you did not think to
+# include, and a WLAN carries ~55 of them (dtim timers, minrate tables, PMF mode, band steering...).
+#
+# For a NEW WLAN there is no live object to merge into, so the base is taken from an EXISTING WLAN
+# on the same controller (unifi_wlan_model_ssid) with only identity/security fields overridden.
+# That way the new SSID inherits whatever radio/roaming settings this controller actually uses
+# rather than whatever the API documentation happens to default to.
+
+- name: Resolve the role's generated defaults
+  ansible.builtin.include_tasks: setup_vars.yml
+
+- name: Assert the API key was supplied
+  ansible.builtin.assert:
+    that:
+      - (unifi_wlan_api_key | default('')) | length > 0
+      - (unifi_wlan_api_key | default('')) != "CHANGE_ME_VIA_1PASSWORD"
+    fail_msg: >-
+      unifi_wlan_api_key must be supplied (and not the placeholder). If it comes from a secrets
+      manager, check the FIELD the key is stored in: reading the wrong field returns an empty
+      string, and every request then 401s in a way that looks like a scope problem.
+    quiet: true
+
+- name: Fetch the live WLAN configuration
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/wlanconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    return_content: true
+  register: _wlan_live
+  changed_when: false
+
+- name: Fetch the live network configuration (to resolve the target network by name)
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    return_content: true
+  register: _net_live
+  changed_when: false
+
+- name: Resolve the target network
+  ansible.builtin.set_fact:
+    _wlan_target_net: >-
+      {{ _net_live.json.data | selectattr('name', 'equalto', unifi_wlan_network_name)
+         | list | first | default({}) }}
+    _wlan_existing: >-
+      {{ _wlan_live.json.data | selectattr('name', 'equalto', unifi_wlan_ssid)
+         | list | first | default({}) }}
+    _wlan_model: >-
+      {{ _wlan_live.json.data | selectattr('name', 'equalto', unifi_wlan_model_ssid)
+         | list | first | default({}) }}
+
+- name: HARD GATE — the target network must exist
+  # Refusing to guess: an SSID attached to the wrong network puts every device that joins it on the
+  # wrong VLAN, which is a security boundary, not a cosmetic error.
+  ansible.builtin.assert:
+    that:
+      - (_wlan_target_net | length) > 0
+    fail_msg: >-
+      Network '{{ unifi_wlan_network_name }}' not found on the controller. Known networks:
+      {{ _net_live.json.data | map(attribute='name') | list | sort }}.
+    success_msg: >-
+      Target network '{{ unifi_wlan_network_name }}'
+      (vlan {{ _wlan_target_net.vlan | default('untagged') }},
+      subnet {{ _wlan_target_net.ip_subnet | default('?') }}).
+    quiet: true
+
+- name: HARD GATE — a model WLAN must exist when creating a new one
+  ansible.builtin.assert:
+    that:
+      - (_wlan_existing | length) > 0 or (_wlan_model | length) > 0
+    fail_msg: >-
+      Creating '{{ unifi_wlan_ssid }}' needs an existing WLAN to model radio settings on, but
+      '{{ unifi_wlan_model_ssid }}' was not found. Known WLANs:
+      {{ _wlan_live.json.data | map(attribute='name') | list }}.
+    quiet: true
+
+- name: Build the desired WLAN object
+  # Merge order matters: model/live object first, then our overrides. Identity fields (_id,
+  # short_id, external_id, x_iapp_key) are stripped from the MODEL so the controller allocates new
+  # ones — copying them would collide with the WLAN being modelled on.
+  ansible.builtin.set_fact:
+    _wlan_desired: >-
+      {{ (_wlan_existing if (_wlan_existing | length) > 0
+          else (_wlan_model | dict2items
+                | rejectattr('key', 'in', ['_id', 'short_id', 'external_id', 'x_iapp_key'])
+                | items2dict))
+         | combine(_wlan_overrides) }}
+  vars:
+    _wlan_overrides: >-
+      {{ {'name': unifi_wlan_ssid,
+          'enabled': unifi_wlan_enabled,
+          'hide_ssid': unifi_wlan_hidden,
+          'security': unifi_wlan_security,
+          'wpa_mode': unifi_wlan_wpa_mode,
+          'wpa3_support': unifi_wlan_wpa3_support,
+          'wpa3_transition': unifi_wlan_wpa3_transition,
+          'pmf_mode': unifi_wlan_pmf_mode,
+          'networkconf_id': _wlan_target_net._id,
+          'is_guest': false,
+          'x_passphrase': unifi_wlan_passphrase} }}
+
+- name: Report the plan
+  # The passphrase is deliberately absent from this message.
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'APPLY' if unifi_wlan_apply else 'PREVIEW (set unifi_wlan_apply=true to act)' }}:
+      {{ 'UPDATE' if (_wlan_existing | length) > 0 else 'CREATE' }} SSID
+      '{{ unifi_wlan_ssid }}' on network '{{ unifi_wlan_network_name }}'
+      (vlan {{ _wlan_target_net.vlan | default('untagged') }});
+      hidden={{ unifi_wlan_hidden }}, security={{ unifi_wlan_security }},
+      wpa_mode={{ unifi_wlan_wpa_mode }}, wpa3={{ unifi_wlan_wpa3_support }},
+      pmf={{ unifi_wlan_pmf_mode }}, enabled={{ unifi_wlan_enabled }}
+
+- name: PREVIEW mode — stop here
+  ansible.builtin.meta: end_play
+  when: not unifi_wlan_apply
+
+- name: Create the WLAN
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/wlanconf"
+    method: POST
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+      Content-Type: application/json
+    body_format: json
+    body: "{{ _wlan_desired }}"
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    status_code: [200, 201]
+    return_content: true
+  register: _wlan_create
+  when: (_wlan_existing | length) == 0
+  changed_when: (_wlan_existing | length) == 0
+
+# THE POST SILENTLY DROPS FIELDS THE PUT ACCEPTS. Creating a WLAN with hide_ssid/pmf_mode/
+# wpa3_support in the POST body can return rc=ok and store the MODEL's values for all three — the
+# new WLAN comes back visible, PMF disabled, WPA3 off, with no error anywhere. The identical fields
+# in a PUT are applied correctly.
+#
+# So creation is treated as two steps: POST to allocate the object, then ALWAYS PUT to enforce the
+# settings we actually asked for. The read-back gate below is what catches this; without it the
+# play would report a hidden, PMF-required SSID that was in fact neither.
+- name: Re-read the WLAN after creation to get its new id
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/wlanconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    return_content: true
+  register: _wlan_postcreate
+  when: (_wlan_existing | length) == 0
+  changed_when: false
+
+- name: Resolve the id to enforce settings against
+  ansible.builtin.set_fact:
+    _wlan_enforce_id: >-
+      {{ _wlan_existing._id if (_wlan_existing | length) > 0
+         else (_wlan_postcreate.json.data | selectattr('name', 'equalto', unifi_wlan_ssid)
+               | map(attribute='_id') | first | default('')) }}
+
+- name: Update the WLAN
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/wlanconf/{{ _wlan_enforce_id }}"
+    method: PUT
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+      Content-Type: application/json
+    body_format: json
+    body: "{{ _wlan_desired }}"
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    status_code: [200]
+    return_content: true
+  register: _wlan_update
+  changed_when: true
+
+- name: Read the WLAN back from the controller
+  # Never trust the write's own response: the controller can accept a POST and normalise or reject
+  # individual fields, so the only proof is what it reports afterwards.
+  ansible.builtin.uri:
+    url: "{{ _unifi_wlan_base }}/rest/wlanconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_wlan_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_wlan_validate_certs }}"
+    return_content: true
+  register: _wlan_after
+  changed_when: false
+
+- name: Extract the WLAN as the controller now holds it
+  ansible.builtin.set_fact:
+    _wlan_readback: >-
+      {{ _wlan_after.json.data | selectattr('name', 'equalto', unifi_wlan_ssid)
+         | list | first | default({}) }}
+
+- name: HARD GATE — the controller must hold what we asked for
+  ansible.builtin.assert:
+    that:
+      - (_wlan_readback | length) > 0
+      - _wlan_readback.hide_ssid | bool == unifi_wlan_hidden | bool
+      - _wlan_readback.networkconf_id == _wlan_target_net._id
+      - _wlan_readback.security == unifi_wlan_security
+      - _wlan_readback.enabled | bool == unifi_wlan_enabled | bool
+    fail_msg: >-
+      The controller did not store '{{ unifi_wlan_ssid }}' as requested. Read back:
+      hidden={{ _wlan_readback.hide_ssid | default('?') }},
+      security={{ _wlan_readback.security | default('?') }},
+      network={{ _wlan_readback.networkconf_id | default('?') }},
+      enabled={{ _wlan_readback.enabled | default('?') }}.
+    success_msg: >-
+      '{{ unifi_wlan_ssid }}' is live: hidden={{ _wlan_readback.hide_ssid }},
+      security={{ _wlan_readback.security }}, wpa_mode={{ _wlan_readback.wpa_mode }},
+      pmf={{ _wlan_readback.pmf_mode | default('?') }},
+      on network '{{ unifi_wlan_network_name }}'.
+    quiet: true

@@ -1,0 +1,50 @@
+---
+# Prove the running server reflects the transaction. Never trust nsupdate's rc alone: RFC 2136 has
+# genuine silent-ignore cases (an A add at a CNAME-occupied name "succeeds" and does nothing).
+
+- name: Verify — read back every name this run touched
+  ansible.builtin.command:
+    cmd: "dig @{{ bind9_addr }} {{ item }}.{{ svc_dns_zone }} +short +time=3 +tries=2"
+  register: _svc_reads
+  changed_when: false
+  failed_when: false
+  loop: "{{ (svc_dns_adds + svc_dns_deletes) | unique | sort }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Verify — classify the results
+  ansible.builtin.set_fact:
+    _svc_bad_adds: >-
+      {{ _svc_reads.results | default([])
+         | selectattr('item', 'in', svc_dns_adds)
+         | rejectattr('stdout', 'search', svc_dns_target)
+         | map(attribute='item') | list }}
+    _svc_bad_dels: >-
+      {{ _svc_reads.results | default([])
+         | selectattr('item', 'in', svc_dns_deletes)
+         | rejectattr('stdout', 'equalto', '')
+         | map(attribute='item') | list }}
+    _svc_diag: >-
+      {{ _svc_reads.results | default([])
+         | selectattr('stdout', 'search', '^;;') | map(attribute='item') | list }}
+
+- name: HARD GATE — the server must reflect every change
+  # Separate messages per failure class, because they have different causes: an add that did not
+  # land is usually a CNAME-node collision; a delete that did not is usually the wrong name.
+  # Also rejects dig diagnostics on stdout (dig writes ";; ..." to stdout on failure, so
+  # non-empty output does not mean success).
+  ansible.builtin.assert:
+    that:
+      - (_svc_bad_adds | length) == 0
+      - (_svc_bad_dels | length) == 0
+      - (_svc_diag | length) == 0
+    fail_msg: >-
+      Reconcile did not fully apply in {{ svc_dns_zone }}.
+      Adds that do not resolve to {{ svc_dns_target }}: {{ _svc_bad_adds }} —
+      most often an add at a name still holding a CNAME, which RFC 2136 SILENTLY ignores.
+      Deletes that still resolve: {{ _svc_bad_dels }}.
+      Names whose lookup errored: {{ _svc_diag }}.
+    success_msg: >-
+      {{ svc_dns_zone }} reconciled: {{ svc_dns_adds | length }} added,
+      {{ svc_dns_deletes | length }} removed, all verified against the running server.
+    quiet: true

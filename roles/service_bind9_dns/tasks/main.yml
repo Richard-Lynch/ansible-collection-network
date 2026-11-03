@@ -1,0 +1,135 @@
+---
+# service_bind9_dns — deploy/reconcile the bind9 server (base config only). Zones/records are added by
+# the record-management task files (add_domain, add_vlan, add_cname_to_domain, add_host_to_domain),
+# which service plays call via `tasks_from:`. This main path is the SERVER: compose + named.conf skeleton
+# + keys + the per-VLAN zones for the configured `vlans`.
+
+- name: Ensure config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ bind9_config_dir }}"
+    - "{{ bind9_config_dir }}/config"
+
+# This directory is bind-mounted into the container at /etc/bind/zones. named drops privileges to
+# `-u bind` (uid 100 in the ubuntu/bind9 image, the standard Debian/Ubuntu allocation), and every
+# dynamic UPDATE must CREATE a .jnl journal file here before it can commit. If the directory is
+# root:root mode 0755 (Ansible's default under `become: root`), the bind user can read but not
+# write, journal creation fails and named logs:
+#   /etc/bind/zones/<zone>.zone.jnl: create: permission denied
+#   updating zone '<zone>/IN': error: journal open failed: unexpected error
+# and answers every UPDATE with SERVFAIL (Kea reports DHCP_DDNS_FORWARD_ADD_REJECTED, RCODE 2) even
+# though TSIG and the zone's allow-update are correct. Owning the directory (and the zone files
+# already in it, so a host provisioned before this task existed is fixed too) as bind:bind fixes
+# this at the source instead of loosening the mode to something world-writable.
+- name: Ensure the zones directory exists and is owned by the in-container bind user
+  ansible.builtin.file:
+    path: "{{ bind9_config_dir }}/zones"
+    state: directory
+    mode: "0755"
+    owner: "{{ bind9_zones_owner_uid }}"
+    group: "{{ bind9_zones_owner_gid }}"
+
+- name: Own any zone files already on disk (zones seeded before the ownership was set)
+  ansible.builtin.file:
+    path: "{{ bind9_config_dir }}/zones"
+    state: directory
+    recurse: true
+    owner: "{{ bind9_zones_owner_uid }}"
+    group: "{{ bind9_zones_owner_gid }}"
+  register: _zones_ownership
+  notify: Restart bind9
+
+- name: Read back the zones directory ownership (never trust the file module's rc alone)
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones"
+  register: _zones_stat
+
+# Skipped when the caller says it is previewing. The chown above did not run, so this would always
+# report the CURRENT (wrong) ownership and abort the preview.
+#
+# NOTE it gates on `bind9_verify_ownership`, NOT on `ansible_check_mode`. A block-level
+# `check_mode: true` does NOT set ansible_check_mode — verified: it still reads False inside the
+# block. That fact is only set by running the whole play with `--check`. Gating on it here silently
+# never fired, which is exactly the kind of guard that looks right and does nothing.
+- name: HARD GATE — the zones directory must actually be owned by the bind uid/gid now
+  # Skipped in check_mode: the chown above is a no-op preview (reports changed=true but does not
+  # write), so a stat read-back here would see stale ownership and fail a run that made zero changes
+  # on purpose.
+  ansible.builtin.assert:
+    that:
+      - _zones_stat.stat.uid == bind9_zones_owner_uid
+      - _zones_stat.stat.gid == bind9_zones_owner_gid
+      - _zones_stat.stat.writeable | default(true)
+    fail_msg: >-
+      {{ bind9_config_dir }}/zones is owned {{ _zones_stat.stat.uid }}:{{ _zones_stat.stat.gid }},
+      expected {{ bind9_zones_owner_uid }}:{{ bind9_zones_owner_gid }}. DDNS will still fail
+      (journal create: permission denied) until this is corrected — check whether the host
+      filesystem supports the target uid/gid (e.g. an unprivileged LXC's uid mapping range).
+    quiet: true
+  when:
+    - bind9_verify_ownership | default(true) | bool
+
+- name: Render docker-compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ bind9_config_dir }}/docker-compose.yml"
+    mode: "0644"
+  notify: Restart bind9
+
+- name: Render app.env
+  ansible.builtin.copy:
+    dest: "{{ bind9_config_dir }}/app.env"
+    content: "TZ={{ env.TZ | default('Etc/UTC') }}\n"
+    mode: "0644"
+  notify: Restart bind9
+
+- name: Render the TSIG key file (DDNS)
+  ansible.builtin.template:
+    src: named.conf.keys.j2
+    dest: "{{ bind9_config_dir }}/config/named.conf.keys"
+    # 0644 so the in-container `bind` user can read it; protect the secret by restricting access to
+    # bind9_config_dir on the host, not by mode. 0640 → bind9 exits "permission denied".
+    mode: "0644"
+  notify: Restart bind9
+
+- name: Render named.conf.options (options{}/logging{} — rendered FRESH every run)
+  # Unlike named.conf itself, this file carries no hand/role-appended state, so it is always
+  # overwritten. This is what makes bind9_recursion / bind9_forward_ip changes (a topology change)
+  # actually take effect on an already-provisioned host instead of being silently ignored by the
+  # force:false named.conf below.
+  ansible.builtin.template:
+    src: named.conf.options.j2
+    dest: "{{ bind9_config_dir }}/config/named.conf.options"
+    mode: "0644"
+  notify: Restart bind9
+
+- name: Render the base named.conf skeleton (zone stanzas appended by add_domain/add_vlan)
+  ansible.builtin.template:
+    src: named.conf.j2
+    dest: "{{ bind9_config_dir }}/config/named.conf"
+    mode: "0644"
+    # force=false: don't clobber a named.conf that already has managed zone blocks appended to it
+    force: false
+  notify: Restart bind9
+
+# --- primary domain + per-VLAN zones (idempotent; each sub-task no-ops if present) ---
+- name: Ensure the primary domain zone exists
+  ansible.builtin.include_tasks: add_domain.yml
+  vars:
+    bind9_domain: "{{ bind9_primary_domain }}"
+
+- name: Ensure each VLAN's forward + reverse zones exist
+  ansible.builtin.include_tasks: add_vlan.yml
+  loop: "{{ vlans | default({}) | dict2items | map(attribute='value') | list }}"
+  loop_control:
+    loop_var: bind9_vlan_item
+
+- name: Deploy the bind9 docker stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ bind9_config_dir }}"
+    state: present
+    recreate: auto
+  when: bind9_deploy | default(true) | bool # set false to render config only (tests)

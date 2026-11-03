@@ -1,0 +1,177 @@
+---
+# service_tailscale — install tailscaled, join a control server, and converge the node's prefs
+# (routes advertised, exit node, DNS/route acceptance) to the declaration.
+#
+# JOIN ONCE, THEN CONVERGE. `tailscale up` with an auth key runs only when the node is not already
+# logged in to the declared control server; after that every run is `tailscale set`, and only when
+# the live prefs differ — so a re-run needs no new key and reports `changed` only for a real change.
+#
+# The state compared is what tailscaled REPORTS (`tailscale debug prefs`), not what was last passed
+# on a command line.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Run the generated argspec guards
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: HARD GATE — /dev/net/tun must exist
+  # tailscaled in kernel mode needs a TUN device. In an unprivileged LXC it must be passed through
+  # by the hypervisor; without it tailscaled falls back or fails in ways that look like a network
+  # problem rather than a missing device.
+  ansible.builtin.stat:
+    path: "{{ tailscale_tun_path }}"
+  register: _ts_tun
+
+- name: Assert the TUN device is present and a character device
+  ansible.builtin.assert:
+    that:
+      - _ts_tun.stat.exists
+      - _ts_tun.stat.ischr | default(false)
+    fail_msg: >-
+      {{ tailscale_tun_path }} is missing on {{ inventory_hostname }}. On an LXC guest, pass it through from the
+      hypervisor first (a device passthrough in the container's config).
+    quiet: true
+
+- name: Add the Tailscale apt repository
+  ansible.builtin.deb822_repository:
+    name: tailscale
+    types: [deb]
+    uris: "https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }}"
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [main]
+    signed_by: "https://pkgs.tailscale.com/stable/{{ ansible_distribution | lower }}/{{ ansible_distribution_release }}.noarmor.gpg"
+  register: _ts_repo
+
+- name: Install the pinned tailscale package
+  ansible.builtin.apt:
+    name: "tailscale={{ tailscale_version }}"
+    update_cache: "{{ _ts_repo is changed }}"
+    cache_valid_time: 3600
+
+- name: Enable IP forwarding (subnet routers and exit nodes forward traffic)
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-tailscale.conf
+    sysctl_set: true
+    state: present
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+  when: tailscale_advertise_routes | length > 0 or tailscale_advertise_exit_node
+
+- name: Ensure tailscaled is enabled and running
+  ansible.builtin.systemd_service:
+    name: tailscaled
+    enabled: true
+    state: started
+
+- name: Read the daemon's state
+  ansible.builtin.command:
+    argv: [tailscale, status, --json]
+  register: _ts_status_raw
+  changed_when: false
+  # Exits non-zero while logged out; the JSON is still printed and is what is read below.
+  failed_when: _ts_status_raw.stdout | length == 0
+
+- name: Read the daemon's prefs
+  ansible.builtin.command:
+    argv: [tailscale, debug, prefs]
+  register: _ts_prefs_raw
+  changed_when: false
+
+- name: Compute desired vs live
+  ansible.builtin.set_fact:
+    _ts_backend: "{{ (_ts_status_raw.stdout | from_json).BackendState | default('Unknown') }}"
+    _ts_prefs: "{{ _ts_prefs_raw.stdout | from_json }}"
+    _ts_want_routes: >-
+      {{ (tailscale_advertise_routes
+          + (['0.0.0.0/0', '::/0'] if tailscale_advertise_exit_node else []))
+         | sort }}
+
+- name: Decide whether the node must (re)join
+  ansible.builtin.set_fact:
+    _ts_needs_join: >-
+      {{ _ts_backend != 'Running'
+         or (_ts_prefs.ControlURL | default('')) != tailscale_login_server }}
+
+- name: HARD GATE — a join needs an auth key
+  ansible.builtin.assert:
+    that:
+      - tailscale_auth_key | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} is not joined to {{ tailscale_login_server }} (backend
+      {{ _ts_backend }}, control {{ _ts_prefs.ControlURL | default('none') }}) and no
+      tailscale_auth_key was supplied.
+    quiet: true
+  when: _ts_needs_join
+
+- name: Join the tailnet
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - up
+      - "--login-server={{ tailscale_login_server }}"
+      - "--auth-key={{ tailscale_auth_key }}"
+      - "--hostname={{ tailscale_hostname }}"
+      - "--advertise-routes={{ tailscale_advertise_routes | join(',') }}"
+      - "--advertise-exit-node={{ tailscale_advertise_exit_node | string | lower }}"
+      - "--accept-dns={{ tailscale_accept_dns | string | lower }}"
+      - "--accept-routes={{ tailscale_accept_routes | string | lower }}"
+      - "--timeout=60s"
+  when: _ts_needs_join
+  changed_when: true
+  no_log: true
+
+- name: Converge prefs on an already-joined node
+  ansible.builtin.command:
+    argv:
+      - tailscale
+      - set
+      - "--hostname={{ tailscale_hostname }}"
+      - "--advertise-routes={{ tailscale_advertise_routes | join(',') }}"
+      - "--advertise-exit-node={{ tailscale_advertise_exit_node | string | lower }}"
+      - "--accept-dns={{ tailscale_accept_dns | string | lower }}"
+      - "--accept-routes={{ tailscale_accept_routes | string | lower }}"
+  when:
+    - not _ts_needs_join
+    - >-
+      ((_ts_prefs.AdvertiseRoutes | default([]) or []) | sort) != _ts_want_routes
+      or (_ts_prefs.CorpDNS | default(true)) != tailscale_accept_dns
+      or (_ts_prefs.RouteAll | default(false)) != tailscale_accept_routes
+      or (_ts_prefs.Hostname | default('')) != tailscale_hostname
+  changed_when: true
+
+- name: Read the prefs back
+  ansible.builtin.command:
+    argv: [tailscale, debug, prefs]
+  register: _ts_prefs_after_raw
+  changed_when: false
+
+- name: Read the state back
+  ansible.builtin.command:
+    argv: [tailscale, status, --json]
+  register: _ts_status_after_raw
+  changed_when: false
+  failed_when: _ts_status_after_raw.stdout | length == 0
+
+- name: HARD GATE — the node is running on the declared control server with the declared prefs
+  vars:
+    _p: "{{ _ts_prefs_after_raw.stdout | from_json }}"
+    _s: "{{ _ts_status_after_raw.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - (_s.BackendState | default('')) == 'Running'
+      - (_p.ControlURL | default('')) == tailscale_login_server
+      - ((_p.AdvertiseRoutes | default([]) or []) | sort) == _ts_want_routes
+      - (_p.CorpDNS | default(true)) == tailscale_accept_dns
+      - (_p.RouteAll | default(false)) == tailscale_accept_routes
+    fail_msg: >-
+      tailscaled reports backend={{ _s.BackendState | default('?') }},
+      control={{ _p.ControlURL | default('?') }}, routes={{ _p.AdvertiseRoutes | default([]) }},
+      CorpDNS={{ _p.CorpDNS | default('?') }}, RouteAll={{ _p.RouteAll | default('?') }} —
+      expected Running on {{ tailscale_login_server }} advertising {{ _ts_want_routes }}.
+    success_msg: >-
+      {{ inventory_hostname }} joined as {{ (_s.Self.TailscaleIPs | default(['?']))[0] }},
+      advertising {{ _ts_want_routes | length }} routes.

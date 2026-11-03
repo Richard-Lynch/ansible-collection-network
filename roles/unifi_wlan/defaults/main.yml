@@ -1,0 +1,25 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/unifi_wlan/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate unifi_wlan
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+unifi_wlan_hidden__default: false
+unifi_wlan_enabled__default: true
+unifi_wlan_security__default: wpapsk
+unifi_wlan_wpa_mode__default: wpa2
+unifi_wlan_wpa3_support__default: false
+unifi_wlan_wpa3_transition__default: false
+
+# 802.11w protected management frames: disabled|optional|required.
+unifi_wlan_pmf_mode__default: optional
+
+# Generate-don't-apply: report the plan unless explicitly true.
+unifi_wlan_apply__default: false
+unifi_wlan_site__default: default
+unifi_wlan_validate_certs__default: false

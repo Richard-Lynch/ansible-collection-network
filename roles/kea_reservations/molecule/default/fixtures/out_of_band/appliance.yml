@@ -1,0 +1,7 @@
+---
+subnet_id: 40
+hw_address: "02:00:5E:10:00:03"
+ip_address: "198.51.100.8"
+hostname: "appliance"
+why: >-
+  An appliance rather than a managed host, but an unreserved lease is an address nothing owns.

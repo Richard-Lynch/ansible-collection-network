@@ -1,0 +1,15 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/kea_reservations/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate kea_reservations
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      declare
+
+# Generate-don't-apply: report the file that WOULD be written and change
+# nothing unless true. Matches the house convention for anything that
+# writes.
+reservation_declare_apply__default: false

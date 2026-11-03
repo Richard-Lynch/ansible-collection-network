@@ -1,0 +1,255 @@
+---
+# Resolve declared options over their generated defaults.
+#
+# MUST BE FIRST. defaults/main.yml holds `<name>__default`, and everything below (plus both
+# templates) reads the PLAIN name — `kea_pool_offset`, `kea_reservations`, `kea_container_name`.
+# This binds one to the other, so a caller-supplied value wins and an unsupplied one falls back
+# instead of evaluating Undefined.
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+# Constraints Ansible's own argspec validator cannot express (numeric ranges, min lengths).
+# Generated from the same argument_specs.py as everything else, so a declared range is enforced
+# rather than decorative.
+- name: Enforce the constraints Ansible cannot
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+# GUARD RAILS — these run BEFORE any config is rendered, so a misconfigured VLAN fails the play
+# instead of silently producing a Kea that hands out wrong DNS names or leases reserved addresses.
+
+- name: Assert the caller supplied a reservation set, or said it meant not to
+  # THE EMPTY-SET TRAP. `kea_reservations` defaults to [], which is a legitimate value — a Kea with
+  # no reservations is valid. But it is also what a caller gets by FORGETTING to merge
+  # reservations.d, and the two are indistinguishable from inside this role.
+  #
+  # The consequence is not a failed run: the config renders fine, `kea-dhcp4 -t` passes, the restart
+  # succeeds, and every reservation silently disappears from live DHCP. Each affected host keeps its
+  # address until its next renewal and then moves — hours later, far from the play that caused it.
+  #
+  # It bites hardest when several plays deploy this role: any call site that does not merge the
+  # reservations first would wipe every reservation on its next run.
+  #
+  # So: an empty set must be DECLARED. Callers that genuinely want no reservations pass
+  # kea_reservations_allow_empty=true; every other caller has to merge first.
+  ansible.builtin.assert:
+    that:
+      - (kea_reservations | default([]) | length) > 0
+    fail_msg: >-
+      No DHCP reservations were supplied. Deploying now would render a Kea with ZERO reservations
+      and every reserved host would renumber at its next renewal — silently, hours later.
+      Include kea_reservations before this role:
+        - ansible.builtin.include_role: {name: kea_reservations}
+          vars: {kea_reservations_dir: "<path to your reservations.d>"}
+      If this deployment genuinely has no reservations, say so explicitly with
+      kea_reservations_allow_empty=true.
+    success_msg: >-
+      {{ kea_reservations | length }} reservation(s) supplied.
+    quiet: true
+  when: not (kea_reservations_allow_empty | default(false) | bool)
+
+- name: Assert every kea subnet's DDNS zone matches the bind9 zone scheme
+  # Kea qualifies client names as "<vlan.name>.<vlan.domain_name>." (ddns-qualifying-suffix). bind9
+  # serves "<vlan.name>.{{ kea_dns_zone_suffix }}". If domain_name omits the `vlans` label, kea
+  # registers DDNS into a zone bind9 does not serve — the names simply never resolve, with no error
+  # anywhere (e.g. kea says internal.example.com while bind9 serves internal.vlans.example.com).
+  ansible.builtin.assert:
+    that:
+      - vlan.domain_name | default('') == kea_dns_zone_suffix
+    fail_msg: >-
+      VLAN '{{ vlan.name }}' (id {{ vlan.id }}) has domain_name='{{ vlan.domain_name | default("") }}'
+      but the bind9 zone scheme requires '{{ kea_dns_zone_suffix }}'. Kea would register DDNS names
+      under '{{ vlan.name }}.{{ vlan.domain_name | default("") }}' while bind9 serves
+      '{{ vlan.name }}.{{ kea_dns_zone_suffix }}' — they would never resolve. Fix the VLAN definition
+      in inventory.
+    quiet: true
+  loop: "{{ kea_vlans }}"
+  loop_control:
+    loop_var: vlan
+    label: "{{ vlan.name }}"
+
+- name: Assert the client-facing resolver list is non-empty
+  # `kea_option_dns_servers: []` does NOT trigger `| default(...)` (an empty list is defined), so it
+  # would silently render "domain-name-servers": "" — every client handed an empty resolver list.
+  ansible.builtin.assert:
+    that:
+      - (kea_option_dns_servers | default(kea_dns_servers) | default([])) | length > 0
+    fail_msg: >-
+      No client-facing resolver configured: option 6 would be rendered EMPTY and every DHCP client
+      would be handed no DNS server. Set kea_option_dns_servers (or kea_dns_servers) to the SERVICE
+      address.
+    quiet: true
+
+- name: Assert the client-facing resolver is inside the reserved band
+  # option 6 tells every DHCP client which address to resolve against, so it must name an address
+  # that is stable and outside the dynamic pool. A resolver inside the pool could be leased to another
+  # client; a resolver that is some host's management address strands the fleet the moment that host
+  # stops serving (e.g. after a rollback, every client is left pointing at a box that is no longer
+  # the DNS server).
+  #
+  # LIMIT: this proves the resolver is stable and un-leasable, NOT that it is the *service* address —
+  # a management address in the same band passes too. Naming the right one is the caller's job:
+  # set kea_option_dns_servers from the movable service address, kept separate from the host's own
+  # management address.
+  ansible.builtin.assert:
+    that:
+      - (_res_ip | ansible.utils.ipaddr('int')) > (_sub.base | ansible.utils.ipaddr('int'))
+      - (_res_ip | ansible.utils.ipaddr('int')) <= (_band_end | ansible.utils.ipaddr('int'))
+    fail_msg: >-
+      option-6 resolver {{ _res_ip }} is outside subnet {{ _sub.id }}'s reserved band
+      ({{ _sub.base | ansible.utils.ipmath(1) }} .. {{ _band_end }}). Clients would be told to resolve
+      against an address that is either leasable to someone else or not a stable service address.
+    quiet: true
+  vars:
+    _res_ip: "{{ item.ip }}"
+    # the resolver's OWN subnet, not `kea_vlans | first` — the resolver may live on a different VLAN
+    # from the first kea subnet, so comparing against `first` would test an unrelated subnet.
+    _matching: >-
+      {{ kea_vlans | selectattr('base', 'defined')
+         | selectattr('base', 'match', (_res_ip.split('.')[0:3] | join('.')) ~ '\.') | list }}
+    _sub: "{{ _matching | first }}"
+    _band_end: "{{ (_sub.base ~ '/' ~ _sub.cidr) | ansible.utils.ipmath(kea_pool_offset - 1) }}"
+  loop: "{{ kea_option_dns_servers | default(kea_dns_servers) | default([]) }}"
+  loop_control:
+    label: "option-6 {{ item.ip }}"
+  when:
+    # only checkable when the resolver sits on a subnet kea itself serves; an off-subnet resolver
+    # (e.g. a public one on a guest VLAN) is out of scope for this invariant
+    - _matching | length > 0
+
+- name: Assert every reservation falls inside its subnet's reserved band (outside the pool)
+  # A reservation inside the dynamic pool can be leased to a different client before the reserving
+  # host renews. The band is .2 .. .(1+kea_pool_offset); the pool starts at .(1+kea_pool_offset)+1.
+  ansible.builtin.assert:
+    that:
+      # in the right subnet, and within the band (compare as integers, not strings)
+      - res.ip_address | ansible.utils.ipaddr(_subnet.base ~ '/' ~ _subnet.cidr) | ternary(true, false)
+      - (res.ip_address | ansible.utils.ipaddr('int')) > (_subnet.base | ansible.utils.ipaddr('int'))
+      - (res.ip_address | ansible.utils.ipaddr('int')) <= (_band_end | ansible.utils.ipaddr('int'))
+    fail_msg: >-
+      Reservation {{ res.ip_address }} ({{ res.hostname | default(res.hw_address) }}) on subnet
+      {{ res.subnet_id }} is outside the reserved band (must be within
+      {{ _subnet.base | ansible.utils.ipmath(1) }} .. {{ _band_end }}). Addresses at or above
+      {{ _subnet.base | ansible.utils.ipmath(kea_pool_offset) }} are inside the dynamic pool and can
+      be leased to another client. Either move the reservation into the band or raise kea_pool_offset.
+    quiet: true
+  vars:
+    _subnet: "{{ kea_vlans | selectattr('id', 'equalto', res.subnet_id) | first }}"
+    _band_end: "{{ (_subnet.base ~ '/' ~ _subnet.cidr) | ansible.utils.ipmath(kea_pool_offset - 1) }}"
+  # EXEMPTIONS: a reservation may opt out by listing its address in kea_inpool_reservations_allowed,
+  # which exists so the exception is DECLARED rather than achieved by deleting the guard. Kea does
+  # honour in-pool reservations — it will not lease the address to another client — so the risk the
+  # guard names is real but bounded, and sometimes an address is load-bearing enough that moving it
+  # is the larger risk. Each entry needs a reason in the vars file next to the reservation itself.
+  loop: >-
+    {{ kea_reservations | default([])
+       | selectattr('subnet_id', 'in', kea_vlans | map(attribute='id') | list)
+       | rejectattr('ip_address', 'in', kea_inpool_reservations_allowed | default([]))
+       | list }}
+  loop_control:
+    loop_var: res
+    label: "{{ res.ip_address }}"
+
+- name: Store vars
+  ansible.builtin.set_fact:
+    kea_files_dir: "{{ role_path }}/files"
+
+- name: Deploy config
+  ansible.builtin.include_role:
+    name: richard_lynch.common.deployment_config
+  vars:
+    deployment_config_source: "{{ kea_files_dir }}"
+    deployment_config_destination: "{{ kea_config_dir }}"
+
+- name: Deploy Docker Stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ kea_config_dir }}"
+    state: present
+    # WARNING: always does not seem to work, freaks out about the networks
+    recreate: auto
+
+# Kea HARD-REJECTS unknown configuration keywords rather than ignoring them, so a bad key or a
+# misplaced scope does not degrade gracefully — kea-dhcp4 refuses to start and DHCP goes down for
+# EVERY subnet it serves. `-t` parses the config and exits without touching the running server, which
+# turns that outage into a failed task. Runs before the restart, and only when something changed.
+# VALIDATES THE TEMPLATE WE JUST WROTE, NOT THE RUNNING CONFIG.
+#
+# The entrypoint renders kea-dhcp4.conf.template -> kea-dhcp4.conf at CONTAINER START, so
+# /etc/kea/kea-dhcp4.conf is the PREVIOUS run's output. Validating that file tests the config
+# already running and says nothing about the one about to be loaded — it passes when the new
+# template is broken, and fails when the new template FIXED something the old one got wrong (a
+# valid new config blocked because the stale file still carries a broken subnet the new template
+# no longer contains).
+#
+# Rendering the template the same way the entrypoint does and validating THAT is the only check
+# that answers the question the gate exists to ask — including its `sed` substitution of
+# __DDNS_IP__. Copying the template RAW leaves the placeholder in place and Kea rejects it
+# ("Failed to convert '__DDNS_IP__' to address"), failing a config that is perfectly valid once
+# rendered. Mirror the entrypoint exactly, or the gate tests something that never runs.
+#
+# DDNS_IP is set in the container's ENVIRONMENT (compose), which a `docker exec` shell does not
+# inherit — leaving it empty substitutes nothing and Kea rejects '' as an address, failing a valid
+# config for a second, different wrong reason. Defaulted here purely so the substitution produces a
+# syntactically valid address: this gate checks the config's STRUCTURE, and the real DDNS_IP is
+# supplied by compose at runtime.
+- name: Render the new template exactly as the entrypoint will, and validate THAT
+  # Shell-quoting this through Ansible's `command:` proved fragile — $DDNS_IP and $rc kept arriving
+  # literally, so the gate failed on its own escaping twice. `shell:` with a plain heredoc-free
+  # script is legible and does the same job.
+  ansible.builtin.shell:
+    cmd: |
+      docker exec {{ kea_container_name | default('kea_dhcp') }} sh -c '
+        DDNS_IP="${DDNS_IP:-127.0.0.1}"
+        sed "s/__DDNS_IP__/$DDNS_IP/g" /etc/kea/kea-dhcp4.conf.template > /tmp/kea-validate.conf
+        kea-dhcp4 -t /tmp/kea-validate.conf
+        rc=$?
+        rm -f /tmp/kea-validate.conf
+        exit $rc
+      '
+  register: kea__config_test
+  changed_when: false
+  failed_when: kea__config_test.rc != 0
+  when: deployment_config_changed
+
+- name: HARD GATE — refuse to restart on an invalid config
+  ansible.builtin.assert:
+    that:
+      - kea__config_test.rc | default(0) == 0
+    fail_msg: >-
+      Rendered Kea config is INVALID and the restart was skipped, so DHCP is still serving the
+      previous config: {{ kea__config_test.stderr | default('') | trim }}.
+      Fix the template before re-running — restarting now would take DHCP down on every subnet.
+    success_msg: "Kea config validates; safe to restart."
+    quiet: true
+  when: deployment_config_changed
+
+- name: Restart Docker Stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ kea_config_dir }}"
+    state: restarted
+  when: deployment_config_changed
+
+# A restart that brings the container up but leaves kea-dhcp4 crash-looping inside it still reports
+# "restarted". Read the service back rather than trusting that.
+- name: Confirm Kea is actually serving after the restart
+  ansible.builtin.command:
+    cmd: >-
+      docker exec {{ kea_container_name | default('kea_dhcp') }}
+      sh -c "kea-dhcp4 -v >/dev/null 2>&1 && echo alive"
+  register: kea__alive
+  changed_when: false
+  retries: 6
+  delay: 5
+  until: "'alive' in (kea__alive.stdout | default(''))"
+  failed_when: false
+  when: deployment_config_changed
+
+- name: HARD GATE — Kea must be alive after the restart
+  ansible.builtin.assert:
+    that:
+      - "'alive' in (kea__alive.stdout | default(''))"
+    fail_msg: >-
+      Kea is not responding after the restart. DHCP may be DOWN — check
+      `docker logs {{ kea_container_name | default('kea_dhcp') }}` immediately.
+    success_msg: "Kea is alive and serving."
+    quiet: true
+  when: deployment_config_changed

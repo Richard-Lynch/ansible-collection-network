@@ -1,0 +1,30 @@
+{# bind9 — flat layout: mount named.conf, its options and keys, the zones dir + a cache volume. #}
+{# https://hub.docker.com/r/ubuntu/bind9 #}
+{# Port publish: bind9_dns_service_bind_ip, when set, binds ONLY that host address (e.g. the
+   Pi-hole-in-front topology, where bind9 must publish only its management address :53 and NOT
+   also grab the service address :53 owned by Pi-hole). Undefined/empty binds on all addresses
+   (no HostIp). #}
+services:
+  {{ bind9_service_name }}:
+    image: {{ bind9_image }}
+    container_name: {{ bind9_service_name }}
+    restart: unless-stopped
+    ports:
+{% if bind9_dns_service_bind_ip | default('') %}
+      - "{{ bind9_dns_service_bind_ip }}:{{ bind9_dns_service_port | default(53) }}:53/tcp"
+      - "{{ bind9_dns_service_bind_ip }}:{{ bind9_dns_service_port | default(53) }}:53/udp"
+{% else %}
+      - "{{ bind9_dns_service_port | default(53) }}:53/tcp"
+      - "{{ bind9_dns_service_port | default(53) }}:53/udp"
+{% endif %}
+    env_file:
+      - {{ bind9_config_dir }}/app.env
+    volumes:
+      - {{ bind9_config_dir }}/config/named.conf:/etc/bind/named.conf
+      - {{ bind9_config_dir }}/config/named.conf.options:/etc/bind/named.conf.options
+      - {{ bind9_config_dir }}/config/named.conf.keys:/etc/bind/named.conf.keys
+      - {{ bind9_config_dir }}/zones:/etc/bind/zones
+      - {{ bind9_service_name }}_data:/var/cache/bind
+
+volumes:
+  {{ bind9_service_name }}_data:

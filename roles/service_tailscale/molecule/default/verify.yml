@@ -1,0 +1,14 @@
+# The converge asserts the guard in its own rescue; nothing is rendered or installed to inspect.
+---
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Nothing was installed by the scenario
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/tailscale.sources
+      register: _repo
+
+    - name: The repo file must not exist (the gate stopped the role before apt)
+      ansible.builtin.assert:
+        that: [not _repo.stat.exists]

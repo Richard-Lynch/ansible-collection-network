@@ -1,0 +1,194 @@
+---
+# Create or update a NETWORK (VLAN) on the UniFi controller.
+#
+# Same discipline as unifi_wlan and unifi_network_dhcp: the UniFi REST API REPLACES the whole
+# object on PUT, so a new network is modelled on an EXISTING one and only identity/addressing
+# fields are overridden. Building one from scratch would drop ~40 fields this controller sets
+# (igmp snooping, mdns, upnp, IPv6 RA, gateway type...) and the API's defaults for them are not
+# necessarily the ones the controller's own UI would choose.
+#
+# THE RELAY TRAP, enforced here: `dhcp_relay_enabled: true` is ONLY accepted
+# when nothing else in the object is changing. Sent alongside anything else, the controller returns
+# rc:ok, applies the rest, and SILENTLY DROPS the flag — leaving a network with no DHCP at all. So
+# a network that should relay is created in TWO steps: create it (DHCP off), then set the relay
+# flag alone. See roles/unifi_network_dhcp/tasks/main.yml for the full evidence.
+
+- name: Resolve defaults
+  ansible.builtin.include_tasks: setup_vars.yml
+
+- name: Assert the API key was supplied
+  ansible.builtin.assert:
+    that:
+      - (unifi_network_api_key | default('')) | length > 0
+    fail_msg: >-
+      unifi_network_api_key is required. If it comes from a secrets manager, check the FIELD the
+      key is stored in: reading the wrong field returns an empty string, and every request then
+      401s in a way that looks like a permissions problem.
+    quiet: true
+
+- name: Fetch the live network configuration
+  ansible.builtin.uri:
+    url: "{{ _unifi_network_base }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_network_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_network_validate_certs }}"
+    return_content: true
+  register: _net_live
+  changed_when: false
+
+- name: Locate the target and the model
+  # Loop-based, not selectattr: `selectattr('vlan', ...)` RAISES on the WAN and VPN objects, which
+  # have no `vlan` key at all.
+  ansible.builtin.set_fact:
+    _net_existing: >-
+      {%- set out = [] -%}
+      {%- for n in _net_live.json.data -%}
+      {%- if n.vlan is defined and n.vlan == (unifi_network_vlan | int) -%}
+      {%- set _ = out.append(n) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | first | default({}) }}
+    _net_model: >-
+      {%- set out = [] -%}
+      {%- for n in _net_live.json.data -%}
+      {%- if n.name is defined and n.name == unifi_network_model -%}
+      {%- set _ = out.append(n) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | first | default({}) }}
+
+- name: HARD GATE — a model network must exist when creating a new one
+  ansible.builtin.assert:
+    that:
+      - (_net_existing | length) > 0 or (_net_model | length) > 0
+    fail_msg: >-
+      Creating vlan {{ unifi_network_vlan }} needs an existing network to model on, but
+      '{{ unifi_network_model }}' was not found. Known:
+      {{ _net_live.json.data | map(attribute='name') | list }}.
+    quiet: true
+
+- name: Build the desired object
+  # Identity fields are stripped from the MODEL so the controller allocates new ones; copying them
+  # would collide with the network being modelled on.
+  #
+  # dhcpd_enabled AND dhcp_relay_enabled are both forced FALSE, and dhcp_relay_servers is stripped
+  # entirely. If the model network is a RELAY network, inheriting its fields would carry relay
+  # state into a POST — and whether the controller honours or silently strips relay-on-create is
+  # indeterminate (the controller's POST has been seen to ignore fields its PUT accepts). Forcing
+  # them off makes the create deterministic and leaves the relay setup
+  # to the one place that does it correctly: a flag-alone PUT after the servers are settled.
+  ansible.builtin.set_fact:
+    _net_desired: >-
+      {{ (_net_existing if (_net_existing | length) > 0
+          else (_net_model | dict2items
+                | rejectattr('key', 'in', ['_id', 'external_id', 'site_id'])
+                | items2dict))
+         | combine({'name': unifi_network_name,
+                    'vlan': unifi_network_vlan | int,
+                    'vlan_enabled': true,
+                    'enabled': true,
+                    'purpose': 'corporate',
+                    'networkgroup': 'LAN',
+                    'ip_subnet': unifi_network_subnet,
+                    'domain_name': unifi_network_domain,
+                    'dhcpd_enabled': false,
+                    'dhcp_relay_enabled': false,
+                    'dhcpd_start': unifi_network_dhcp_start,
+                    'dhcpd_stop': unifi_network_dhcp_stop})
+         | dict2items | rejectattr('key', 'equalto', 'dhcp_relay_servers')
+         | items2dict }}
+
+- name: Report the plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'APPLY' if unifi_network_apply else 'PREVIEW (set unifi_network_apply=true to act)' }}:
+      {{ 'UPDATE' if (_net_existing | length) > 0 else 'CREATE' }}
+      '{{ unifi_network_name }}' vlan {{ unifi_network_vlan }} {{ unifi_network_subnet }};
+      DHCP off on create — relay is set separately because the controller drops the flag when
+      anything else changes in the same request.
+
+- name: PREVIEW mode — stop here
+  ansible.builtin.meta: end_play
+  when: not unifi_network_apply
+
+- name: Create the network
+  ansible.builtin.uri:
+    url: "{{ _unifi_network_base }}/rest/networkconf"
+    method: POST
+    headers:
+      X-API-KEY: "{{ unifi_network_api_key }}"
+      Accept: application/json
+      Content-Type: application/json
+    body_format: json
+    body: "{{ _net_desired }}"
+    validate_certs: "{{ unifi_network_validate_certs }}"
+    status_code: [200, 201]
+    return_content: true
+  register: _net_create
+  when: (_net_existing | length) == 0
+  changed_when: (_net_existing | length) == 0
+
+- name: Update the network
+  ansible.builtin.uri:
+    url: "{{ _unifi_network_base }}/rest/networkconf/{{ _net_existing._id | default('') }}"
+    method: PUT
+    headers:
+      X-API-KEY: "{{ unifi_network_api_key }}"
+      Accept: application/json
+      Content-Type: application/json
+    body_format: json
+    body: "{{ _net_desired }}"
+    validate_certs: "{{ unifi_network_validate_certs }}"
+    status_code: [200]
+    return_content: true
+  register: _net_update
+  when: (_net_existing | length) > 0
+  changed_when: (_net_existing | length) > 0
+
+- name: Read the network back
+  # Never trust the write's own response — the controller normalises and sometimes silently drops
+  # fields (see the relay trap).
+  ansible.builtin.uri:
+    url: "{{ _unifi_network_base }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_network_api_key }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_network_validate_certs }}"
+    return_content: true
+  register: _net_after
+  changed_when: false
+
+- name: Extract it as the controller now holds it
+  ansible.builtin.set_fact:
+    _net_readback: >-
+      {%- set out = [] -%}
+      {%- for n in _net_after.json.data -%}
+      {%- if n.vlan is defined and n.vlan == (unifi_network_vlan | int) -%}
+      {%- set _ = out.append(n) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | first | default({}) }}
+
+- name: HARD GATE — the controller must hold what we asked for
+  ansible.builtin.assert:
+    that:
+      - (_net_readback | length) > 0
+      - _net_readback.name == unifi_network_name
+      - _net_readback.ip_subnet == unifi_network_subnet
+      - (_net_readback.vlan | int) == (unifi_network_vlan | int)
+      # Assert EVERY field written, not a sample. A POST that silently drops one is the known
+      # failure mode here, and checking three of ten would miss it.
+      - _net_readback.domain_name == unifi_network_domain
+      - _net_readback.dhcpd_start == unifi_network_dhcp_start
+      - _net_readback.dhcpd_stop == unifi_network_dhcp_stop
+      - not (_net_readback.dhcpd_enabled | bool)
+      - not (_net_readback.dhcp_relay_enabled | default(false) | bool)
+    fail_msg: >-
+      The controller did not store vlan {{ unifi_network_vlan }} as requested. Read back:
+      name={{ _net_readback.name | default('?') }},
+      subnet={{ _net_readback.ip_subnet | default('?') }},
+      vlan={{ _net_readback.vlan | default('?') }}.
+    success_msg: >-
+      '{{ unifi_network_name }}' is live: vlan {{ _net_readback.vlan }},
+      {{ _net_readback.ip_subnet }}, DHCP off (relay to be set separately).
+    quiet: true

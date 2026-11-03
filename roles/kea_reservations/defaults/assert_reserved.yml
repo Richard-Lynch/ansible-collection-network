@@ -1,0 +1,31 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/kea_reservations/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate kea_reservations
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      assert_reserved
+
+# Set false to DECLARE that this host deliberately has no reservation.
+# Needed for genuine bootstrap cases — the host that runs Kea cannot gate on
+# the Kea it is about to run — and for consumer devices that lease normally.
+# A declared exception, not a silently-skipped check: pair it with a comment
+# saying why, the same shape as kea_inpool_reservations_allowed.
+reservation_expected__default: true
+
+# Also verify the reservation is LIVE in the running Kea, not merely
+# declared on disk.
+# This is the half that makes the gate mean anything. A file in the repo
+# proves someone wrote it; it says nothing about whether Kea would honour it
+# — and the two diverge routinely, because service_kea_dhcp restarts only
+# `when: deployment_config_changed`, so a re-render after a failed run
+# leaves the process serving stale config from memory while every file on
+# disk looks right.
+# Set false only where the live check cannot work (no path to the Kea host).
+reservation_check_live__default: true
+
+# Kea container name on that host.
+reservation_kea_container__default: kea_dhcp

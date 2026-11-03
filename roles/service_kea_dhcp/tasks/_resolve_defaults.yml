@@ -1,0 +1,69 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/service_kea_dhcp/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_kea_dhcp
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    kea_dhcp4_image_version: "{{ kea_dhcp4_image_version | default(kea_dhcp4_image_version__default) if kea_dhcp4_image_version__default is defined else kea_dhcp4_image_version | default(omit) }}"
+    kea_ctrl_agent_bind_address: "{{ kea_ctrl_agent_bind_address | default(kea_ctrl_agent_bind_address__default) if kea_ctrl_agent_bind_address__default is defined else kea_ctrl_agent_bind_address | default(omit) }}"
+    kea_dhcp_ddns_image_version: "{{ kea_dhcp_ddns_image_version | default(kea_dhcp_ddns_image_version__default) if kea_dhcp_ddns_image_version__default is defined else kea_dhcp_ddns_image_version | default(omit) }}"
+    kea_reservations: "{{ kea_reservations | default(kea_reservations__default) if kea_reservations__default is defined else kea_reservations | default(omit) }}"
+    kea_reservations_allow_empty: "{{ kea_reservations_allow_empty | default(kea_reservations_allow_empty__default) if kea_reservations_allow_empty__default is defined else kea_reservations_allow_empty | default(omit) }}"
+    kea_inpool_reservations_allowed: "{{ kea_inpool_reservations_allowed | default(kea_inpool_reservations_allowed__default) if kea_inpool_reservations_allowed__default is defined else kea_inpool_reservations_allowed | default(omit) }}"
+    kea_pool_offset: "{{ kea_pool_offset | default(kea_pool_offset__default) if kea_pool_offset__default is defined else kea_pool_offset | default(omit) }}"
+    kea_ddns_update_on_renew: "{{ kea_ddns_update_on_renew | default(kea_ddns_update_on_renew__default) if kea_ddns_update_on_renew__default is defined else kea_ddns_update_on_renew | default(omit) }}"
+    kea_ddns_conflict_mode: "{{ kea_ddns_conflict_mode | default(kea_ddns_conflict_mode__default) if kea_ddns_conflict_mode__default is defined else kea_ddns_conflict_mode | default(omit) }}"
+    kea_valid_lifetime: "{{ kea_valid_lifetime | default(kea_valid_lifetime__default) if kea_valid_lifetime__default is defined else kea_valid_lifetime | default(omit) }}"
+    kea_renew_timer: "{{ kea_renew_timer | default(kea_renew_timer__default) if kea_renew_timer__default is defined else kea_renew_timer | default(omit) }}"
+    kea_rebind_timer: "{{ kea_rebind_timer | default(kea_rebind_timer__default) if kea_rebind_timer__default is defined else kea_rebind_timer | default(omit) }}"
+    kea_match_client_id: "{{ kea_match_client_id | default(kea_match_client_id__default) if kea_match_client_id__default is defined else kea_match_client_id | default(omit) }}"
+    kea_authoritative: "{{ kea_authoritative | default(kea_authoritative__default) if kea_authoritative__default is defined else kea_authoritative | default(omit) }}"
+    kea_socket_type: "{{ kea_socket_type | default(kea_socket_type__default) if kea_socket_type__default is defined else kea_socket_type | default(omit) }}"
+    kea_container_name: "{{ kea_container_name | default(kea_container_name__default) if kea_container_name__default is defined else kea_container_name | default(omit) }}"
+  when: not (_service_kea_dhcp__argspec_resolved | default(false))
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    kea_dhcp4_image_version: "{{ kea_dhcp4_image_version__default if kea_dhcp4_image_version__default is defined else kea_dhcp4_image_version | default(omit) }}"
+    kea_ctrl_agent_bind_address: "{{ kea_ctrl_agent_bind_address__default if kea_ctrl_agent_bind_address__default is defined else kea_ctrl_agent_bind_address | default(omit) }}"
+    kea_dhcp_ddns_image_version: "{{ kea_dhcp_ddns_image_version__default if kea_dhcp_ddns_image_version__default is defined else kea_dhcp_ddns_image_version | default(omit) }}"
+    kea_reservations: "{{ kea_reservations__default if kea_reservations__default is defined else kea_reservations | default(omit) }}"
+    kea_reservations_allow_empty: "{{ kea_reservations_allow_empty__default if kea_reservations_allow_empty__default is defined else kea_reservations_allow_empty | default(omit) }}"
+    kea_inpool_reservations_allowed: "{{ kea_inpool_reservations_allowed__default if kea_inpool_reservations_allowed__default is defined else kea_inpool_reservations_allowed | default(omit) }}"
+    kea_pool_offset: "{{ kea_pool_offset__default if kea_pool_offset__default is defined else kea_pool_offset | default(omit) }}"
+    kea_ddns_update_on_renew: "{{ kea_ddns_update_on_renew__default if kea_ddns_update_on_renew__default is defined else kea_ddns_update_on_renew | default(omit) }}"
+    kea_ddns_conflict_mode: "{{ kea_ddns_conflict_mode__default if kea_ddns_conflict_mode__default is defined else kea_ddns_conflict_mode | default(omit) }}"
+    kea_valid_lifetime: "{{ kea_valid_lifetime__default if kea_valid_lifetime__default is defined else kea_valid_lifetime | default(omit) }}"
+    kea_renew_timer: "{{ kea_renew_timer__default if kea_renew_timer__default is defined else kea_renew_timer | default(omit) }}"
+    kea_rebind_timer: "{{ kea_rebind_timer__default if kea_rebind_timer__default is defined else kea_rebind_timer | default(omit) }}"
+    kea_match_client_id: "{{ kea_match_client_id__default if kea_match_client_id__default is defined else kea_match_client_id | default(omit) }}"
+    kea_authoritative: "{{ kea_authoritative__default if kea_authoritative__default is defined else kea_authoritative | default(omit) }}"
+    kea_socket_type: "{{ kea_socket_type__default if kea_socket_type__default is defined else kea_socket_type | default(omit) }}"
+    kea_container_name: "{{ kea_container_name__default if kea_container_name__default is defined else kea_container_name | default(omit) }}"
+  when: _service_kea_dhcp__argspec_resolved | default(false)
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _service_kea_dhcp__argspec_resolved: true

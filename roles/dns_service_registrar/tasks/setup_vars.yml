@@ -1,0 +1,10 @@
+---
+# Bridge the generated `<name>__default` variables onto the names the role actually uses.
+# defaults/main.yml is GENERATED from meta/argument_specs.py and carries the __default suffix, so without this step the
+# plain names are simply undefined and every `| default()` in the role silently papers over it.
+- name: Setup vars — resolve defaults
+  ansible.builtin.set_fact:
+    svc_dns_apply: "{{ svc_dns_apply | default(svc_dns_apply__default) }}"
+    svc_dns_ttl: "{{ svc_dns_ttl | default(svc_dns_ttl__default) }}"
+    svc_tsig_key_name: "{{ svc_tsig_key_name | default(svc_tsig_key_name__default) }}"
+    svc_tsig_key_algorithm: "{{ svc_tsig_key_algorithm | default(svc_tsig_key_algorithm__default) }}"

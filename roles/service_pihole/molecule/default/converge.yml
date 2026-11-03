@@ -1,0 +1,179 @@
+# Render pihole templates directly (like the other roles) and assert output coherence.
+---
+- name: Converge — render + assert pihole config
+  hosts: localhost
+  gather_facts: false
+  vars:
+    render_dir: /tmp/molecule-pihole
+    pihole_service_name: pihole
+    pihole_hostname: "pihole.example.com"
+    pihole_image: "pihole/pihole:2026.07.2"
+    pihole_dns_port: 5053
+    pihole_web_http_port: 5080
+    pihole_web_https_port: 5443
+    pihole_timezone: "Europe/London"
+    pihole_upstreams: ["8.8.8.8", "8.8.4.4"]
+    pihole_listening_mode: "all"
+    pihole_web_password: "TESTPW"
+    pihole_adlists:
+      - "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  tasks:
+    - name: Ensure render dir
+      ansible.builtin.file: { path: "{{ render_dir }}", state: directory, mode: "0755" }
+    - name: Render compose (behind-a-resolver shape — no bind_ip, port 5053)
+      ansible.builtin.template:
+        src: "../../templates/docker-compose.yml.j2"
+        dest: "{{ render_dir }}/docker-compose.yml"
+        mode: "0644"
+    - name: Render adlists
+      ansible.builtin.template:
+        src: "../../templates/adlists.list.j2"
+        dest: "{{ render_dir }}/adlists.list"
+        mode: "0644"
+    - name: Render compose again — front-door shape (bind_ip, port 53, revServers, dnsmasq_lines, reply_host_ip)
+      ansible.builtin.template:
+        src: "../../templates/docker-compose.yml.j2"
+        dest: "{{ render_dir }}/docker-compose.frontdoor.yml"
+        mode: "0644"
+      vars:
+        pihole_dns_bind_ip: "192.0.2.2"
+        pihole_dns_port: 53
+        pihole_rev_servers:
+          - "true,192.0.2.0/24,192.0.2.3"
+          - "true,198.51.100.0/24,192.0.2.3"
+        pihole_dnsmasq_lines:
+          - "server=/example.com/192.0.2.3"
+        pihole_reply_host_ip: "192.0.2.2"
+    - name: Read back
+      ansible.builtin.slurp: { src: "{{ render_dir }}/{{ item }}" }
+      register: _r
+      loop: [docker-compose.yml, adlists.list, docker-compose.frontdoor.yml]
+    - name: Assert coherence — behind-a-resolver render
+      ansible.builtin.assert:
+        that:
+          - "'pihole/pihole:2026.07.2' in (_r.results[0].content | b64decode)"
+          - "'5053:53/udp' in (_r.results[0].content | b64decode)"
+          - "'FTLCONF_dns_upstreams: \"8.8.8.8;8.8.4.4\"' in (_r.results[0].content | b64decode)"
+          - "'FTLCONF_dns_listeningMode: \"ALL\"' in (_r.results[0].content | b64decode)"
+          - "'StevenBlack/hosts' in (_r.results[1].content | b64decode)"
+          # no bind IP set -> must NOT carry an explicit HostIp on the DNS ports
+          - "'\"5053:53/tcp\"' in (_r.results[0].content | b64decode)"
+        fail_msg: "pihole render is not coherent"
+        success_msg: "pihole render OK: pinned image, :5053, upstreams 8.8.8.8/8.8.4.4, listen ALL, adlists"
+    - name: Assert coherence — front-door render
+      ansible.builtin.assert:
+        that:
+          # explicit HostIp so pihole binds ONLY the service address, not all addresses
+          - "'\"192.0.2.2:53:53/tcp\"' in (_r.results[2].content | b64decode)"
+          - "'\"192.0.2.2:53:53/udp\"' in (_r.results[2].content | b64decode)"
+          - "'FTLCONF_dns_revServers: \"true,192.0.2.0/24,192.0.2.3;true,198.51.100.0/24,192.0.2.3\"' in (_r.results[2].content | b64decode)"
+          - "'FTLCONF_misc_dnsmasq_lines: \"server=/example.com/192.0.2.3\"' in (_r.results[2].content | b64decode)"
+          # FTL's own-hostname/pi.hole replies pinned to the service address, not left to
+          # auto-detect the docker-bridge interface
+          - "'FTLCONF_dns_reply_host_force4: \"true\"' in (_r.results[2].content | b64decode)"
+          - "'FTLCONF_dns_reply_host_IPv4: \"192.0.2.2\"' in (_r.results[2].content | b64decode)"
+        fail_msg: "pihole front-door render is not coherent"
+        success_msg: "pihole front-door render OK: explicit HostIp 192.0.2.2:53, revServers, dnsmasq_lines, reply_host_ip"
+    - name: Assert coherence — behind-a-resolver render does NOT set reply_host_ip (unset by default)
+      ansible.builtin.assert:
+        that:
+          - "'FTLCONF_dns_reply_host_force4' not in (_r.results[0].content | b64decode)"
+          - "'FTLCONF_dns_reply_host_IPv4' not in (_r.results[0].content | b64decode)"
+        fail_msg: "behind-a-resolver render should NOT carry FTLCONF_dns_reply_host_* when pihole_reply_host_ip is unset"
+        success_msg: "behind-a-resolver render correctly omits FTLCONF_dns_reply_host_* (var unset)"
+
+    # --- manage_domains diff logic — exercised offline against FABRICATED "live" data, since the real
+    # task file needs a live Pi-hole API. Proves the add/remove computation is correct without network.
+    - name: Manage_domains logic test — desired-state + diff against a fabricated live domain list
+      ansible.builtin.set_fact:
+        _t_wanted_flat: >-
+          {{ (['keep-allow.example.com', 'new-allow.example.com']
+              | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'allow', 'kind': 'exact'}) | list)
+             +
+             (['keep-deny.example.com']
+              | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'deny', 'kind': 'exact'}) | list) }}
+        _t_live_flat:
+          - { domain: keep-allow.example.com, type: allow, kind: exact, comment: "managed by service_pihole (pihole_allow_domains/pihole_deny_domains)" }
+          - { domain: stale-allow.example.com, type: allow, kind: exact, comment: "managed by service_pihole (pihole_allow_domains/pihole_deny_domains)" }
+          - { domain: keep-deny.example.com, type: deny, kind: exact, comment: "managed by service_pihole (pihole_allow_domains/pihole_deny_domains)" }
+          - { domain: hand-added.example.com, type: allow, kind: exact, comment: "added via web UI" }
+
+    - name: Manage_domains logic test — compute ADD (same expression as the real task file)
+      ansible.builtin.set_fact:
+        _t_to_add: >-
+          {{ _t_wanted_flat
+             | rejectattr('domain', 'in', (_t_live_flat | selectattr('type', 'equalto', 'allow')
+                                            | map(attribute='domain') | list))
+             | selectattr('type', 'equalto', 'allow') | list
+             +
+             _t_wanted_flat
+             | rejectattr('domain', 'in', (_t_live_flat | selectattr('type', 'equalto', 'deny')
+                                            | map(attribute='domain') | list))
+             | selectattr('type', 'equalto', 'deny') | list }}
+
+    - name: Manage_domains logic test — compute REMOVE (same expression as the real task file)
+      ansible.builtin.set_fact:
+        _t_to_remove: >-
+          {{ _t_live_flat
+             | selectattr('comment', 'defined')
+             | selectattr('comment', 'equalto', "managed by service_pihole (pihole_allow_domains/pihole_deny_domains)")
+             | rejectattr('domain', 'in', (_t_wanted_flat | map(attribute='domain') | list))
+             | list }}
+
+    - name: Assert manage_domains diff logic is correct
+      ansible.builtin.assert:
+        that:
+          # ADD: only the genuinely missing wanted domain, nothing already live under its type
+          - (_t_to_add | map(attribute='domain') | list) == ['new-allow.example.com']
+          # REMOVE: only the repo-managed stale entry — NOT hand-added.example.com (different comment,
+          # must never be touched), NOT keep-allow/keep-deny (still wanted)
+          - (_t_to_remove | map(attribute='domain') | list) == ['stale-allow.example.com']
+        fail_msg: >-
+          manage_domains diff logic is WRONG — add={{ _t_to_add | map(attribute='domain') | list }},
+          remove={{ _t_to_remove | map(attribute='domain') | list }}
+        success_msg: "manage_domains diff logic OK: adds only missing, removes only repo-managed+unwanted, never touches hand-added entries"
+
+    # --- regex-kind coverage: a
+    # regex allow entry must be added when missing and MUST NOT be conflated with an exact-kind
+    # entry that happens to share a domain-shaped substring — kind is part of the identity. Uses a
+    # plain marker string (not the real regex syntax) so the test is about kind-separation, not
+    # about re-deriving the exact escaping of a real pattern.
+    - name: Manage_domains logic test (regex) — desired-state including a regex allow entry
+      ansible.builtin.set_fact:
+        _t_regex_marker: "REGEXMARKER-example"
+        _t_wanted_flat_rx: >-
+          {{ (['keep-allow.example.com']
+              | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'allow', 'kind': 'exact'}) | list)
+             +
+             (['REGEXMARKER-example']
+              | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'allow', 'kind': 'regex'}) | list) }}
+        _t_live_flat_rx:
+          - { domain: keep-allow.example.com, type: allow, kind: exact, comment: "managed by service_pihole" }
+
+    - name: Manage_domains logic test (regex) — compute ADD across exact+regex kinds
+      ansible.builtin.set_fact:
+        _t_to_add_rx: >-
+          {{ _t_wanted_flat_rx
+             | rejectattr('domain', 'in', (_t_live_flat_rx | selectattr('type', 'equalto', 'allow')
+                                            | selectattr('kind', 'equalto', 'exact')
+                                            | map(attribute='domain') | list))
+             | selectattr('type', 'equalto', 'allow') | selectattr('kind', 'equalto', 'exact') | list
+             +
+             _t_wanted_flat_rx
+             | rejectattr('domain', 'in', (_t_live_flat_rx | selectattr('type', 'equalto', 'allow')
+                                            | selectattr('kind', 'equalto', 'regex')
+                                            | map(attribute='domain') | list))
+             | selectattr('type', 'equalto', 'allow') | selectattr('kind', 'equalto', 'regex') | list }}
+
+    - name: Assert regex-kind rules are added and never conflated with exact-kind rules
+      ansible.builtin.assert:
+        that:
+          # the regex entry must be in the ADD set (it is missing live)
+          - _t_regex_marker in (_t_to_add_rx | map(attribute='domain') | list)
+          # the already-live exact entry must NOT be re-added
+          - "'keep-allow.example.com' not in (_t_to_add_rx | map(attribute='domain') | list)"
+          # the regex entry's kind must round-trip as regex, not get coerced to exact
+          - (_t_to_add_rx | selectattr('domain', 'equalto', _t_regex_marker) | map(attribute='kind') | first) == 'regex'
+        fail_msg: >-
+          manage_domains regex-kind logic is WRONG — add={{ _t_to_add_rx }}
+        success_msg: "manage_domains regex-kind logic OK: regex rules reconciled separately from exact, kind never coerced"

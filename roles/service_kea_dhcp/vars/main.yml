@@ -1,0 +1,6 @@
+---
+kea_service_name: "kea_dhcp"
+kea_config_dir: "/opt/kea_dhcp"
+kea_interface: "eth0"
+ddns_tsig_key_name: dhcp-key
+ddns_tsig_key_algorithm: HMAC-SHA256

@@ -1,0 +1,19 @@
+key "{{ ddns_tsig_key_name }}" {
+    algorithm {{ ddns_tsig_key_algorithm }};
+    secret "{{ ddns_tsig_key_secret }}";
+};
+{% if svc_tsig_key_secret is defined and (svc_tsig_key_secret | length) > 0 %}
+
+{# The service-registration key. DELIBERATELY separate from the DHCP key above: bind9's
+   allow-update is what enforces that Kea cannot write service records and the registrar cannot
+   write host records. Two unattended writers, least privilege between them — worth proving with a
+   test that each key is REFUSED on the other's zones rather than trusting it.
+
+   Guarded on the secret being defined so the role still renders on a host that has not been
+   given the key (a bind9 that serves no svc zones) instead of failing with an undefined-variable
+   error at template time. #}
+key "{{ svc_tsig_key_name | default('svc-key') }}" {
+    algorithm {{ svc_tsig_key_algorithm | default('hmac-sha256') }};
+    secret "{{ svc_tsig_key_secret }}";
+};
+{% endif %}

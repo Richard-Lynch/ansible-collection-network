@@ -1,0 +1,115 @@
+---
+# One record in a DYNAMIC zone (_record_zone_kind.yml said named.conf lets a key update it).
+#
+# blockinfile can never be idempotent here: bind9 owns a journaled zone's file and rewrites it from
+# memory on journal sync, which drops the `; BEGIN/END ANSIBLE MANAGED` markers, so every run would
+# re-insert the same block, restart bind9 and leave a duplicate line per name. Here the record is
+# managed against what bind9 SERVES, over RFC 2136: dig, nsupdate only the difference, dig again.
+# No zone file is ever edited (freezing a zone to edit its file is fragile, and a run dying mid-way
+# leaves the zone frozen against every DDNS registration).
+#
+# ONLY the INFRASTRUCTURE EXCEPTION comes here (bind9_record_infra_exception): names that can never
+# lease, so DDNS can never register them -- static-address hosts and the DNS/DHCP host itself. Every
+# other record in a dynamic zone goes to _dynamic_skip.yml instead: not written, a present one
+# checked read-only.
+#
+# Inputs (set by add_host_to_domain / add_cname_to_domain): _dr_type (A|CNAME), _dr_fqdn, _dr_value
+# (an address, or a target FQDN WITH its trailing dot, which is how dig prints it).
+
+- name: "Dynamic record — reconcile the infrastructure exception {{ _dr_fqdn }}"
+  when: bind9_record_infra_exception | default(false) | bool
+  vars:
+    _dr_server: "{{ bind9_dns_service_bind_ip | default(bind9_server_address, true) }}"
+    _dr_port: "{{ bind9_dns_service_port | default(53) }}"
+    _dr_want: "{{ [_dr_value] if (bind9_state | default('present')) == 'present' else [] }}"
+  block:
+    - name: "Dynamic record — what bind9 serves for {{ _dr_fqdn }} {{ _dr_type }}"
+      ansible.builtin.command:
+        argv: [dig, -p, "{{ _dr_port }}", "@{{ _dr_server }}", "{{ _dr_fqdn }}", "{{ _dr_type }}", +short, +time=3, +tries=2]
+      register: _dr_before
+      changed_when: false
+      failed_when: false
+
+    - name: "Dynamic record — HARD GATE: the read must have worked (dig prints its failures on stdout)"
+      ansible.builtin.assert:
+        that:
+          - _dr_before.rc == 0
+          - _dr_before.stdout_lines | select('match', ';;') | list | length == 0
+        fail_msg: "cannot tell what bind9 serves for {{ _dr_fqdn }} (rc={{ _dr_before.rc }}): {{ _dr_before.stdout | default('') | truncate(200) }}"
+        quiet: true
+
+    - name: "Dynamic record — compare served with declared"
+      ansible.builtin.set_fact:
+        _dr_served: "{{ _dr_before.stdout_lines | map('trim') | reject('equalto', '') | list | sort }}"
+
+    - name: "Dynamic record — send the difference (nsupdate, TSIG)"
+      when: _dr_served != (_dr_want | sort)
+      block:
+        - name: "Dynamic record — HARD GATE: the update key must be present"
+          ansible.builtin.assert:
+            that: (ddns_tsig_key_secret | default('') | length) > 0
+            fail_msg: "ddns_tsig_key_secret is empty: the caller must supply the TSIG key bind9 accepts for this zone."
+            quiet: true
+
+        - name: "Dynamic record — a private keyfile for nsupdate (transient)"
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .bind9rec.key
+          register: _dr_keyfile
+          changed_when: false
+
+        - name: "Dynamic record — write the TSIG key into it"
+          ansible.builtin.copy:
+            dest: "{{ _dr_keyfile.path }}"
+            content: |
+              key "{{ ddns_tsig_key_name | default('dhcp-key') }}" {
+                  algorithm {{ (ddns_tsig_key_algorithm | default('hmac-sha256')) | lower }};
+                  secret "{{ ddns_tsig_key_secret }}";
+              };
+            mode: "0600"
+          changed_when: false
+          no_log: true
+
+        - name: "Dynamic record — {{ 'replace' if _dr_want | length > 0 else 'delete' }} {{ _dr_fqdn }} {{ _dr_type }}"
+          # Delete the whole RRset, then add the one declared value: also repairs a WRONG value, not
+          # only a missing one. One message, so bind9 applies it atomically.
+          ansible.builtin.shell:
+            cmd: |
+              nsupdate -k {{ _dr_keyfile.path }} <<'NSUPDATE_EOF'
+              server {{ _dr_server }} {{ _dr_port }}
+              zone {{ bind9_parent_domain }}
+              update delete {{ _dr_fqdn }} {{ _dr_type }}
+              {% for v in _dr_want %}update add {{ _dr_fqdn }} {{ bind9_record_ttl | default(3600) }} {{ _dr_type }} {{ v }}
+              {% endfor %}send
+              NSUPDATE_EOF
+          register: _dr_sent
+          changed_when: true
+          failed_when: false
+
+        - name: "Dynamic record — HARD GATE: nsupdate must have SENT it"
+          ansible.builtin.assert:
+            that: _dr_sent.rc == 0
+            fail_msg: >-
+              nsupdate rc={{ _dr_sent.rc }} WITHOUT applying: {{ _dr_sent.stderr | default('') | trim }}.
+              REFUSED: allow-update does not admit this key for {{ bind9_parent_domain }};
+              NOTAUTH(BADKEY): bind9 does not know the key.
+            quiet: true
+
+        - name: "Dynamic record — read {{ _dr_fqdn }} back from bind9"
+          ansible.builtin.command:
+            argv: [dig, -p, "{{ _dr_port }}", "@{{ _dr_server }}", "{{ _dr_fqdn }}", "{{ _dr_type }}", +short, +time=3, +tries=2]
+          register: _dr_after
+          changed_when: false
+
+        - name: "Dynamic record — HARD GATE: bind9 now serves exactly the declared value"
+          ansible.builtin.assert:
+            that: (_dr_after.stdout_lines | map('trim') | reject('equalto', '') | list | sort) == (_dr_want | sort)
+            fail_msg: "{{ _dr_fqdn }} {{ _dr_type }}: served {{ _dr_after.stdout_lines }} after the update, declared {{ _dr_want }}"
+            quiet: true
+      always:
+        - name: "Dynamic record — remove the keyfile"
+          ansible.builtin.file:
+            path: "{{ _dr_keyfile.path }}"
+            state: absent
+          when: _dr_keyfile.path is defined
+          changed_when: false

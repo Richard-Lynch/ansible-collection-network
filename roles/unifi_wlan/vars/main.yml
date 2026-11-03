@@ -1,0 +1,2 @@
+---
+_unifi_wlan_base: "https://{{ unifi_wlan_host }}/proxy/network/api/s/{{ unifi_wlan_site }}"

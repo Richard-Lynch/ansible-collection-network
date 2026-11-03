@@ -1,0 +1,94 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/unifi_network_dhcp/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate unifi_network_dhcp
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Reconcile per-network DHCP settings on a UniFi controller
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      unifi_network_dhcp_host:
+        description:
+          - Address of the UniFi controller (e.g. a UniFi gateway).
+        type: str
+        required: true
+      unifi_network_dhcp_site:
+        description:
+          - UniFi site name — the controller's internal reference, not the display name.
+        type: str
+        required: false
+        default: default
+      unifi_network_dhcp_api_key:
+        description:
+          - API key sent as the X-API-KEY header. Supply it from a secrets manager; the placeholder is rejected. A lookup that silently returns an empty string makes every request 401 in a way that looks like a scope error, so check the lookup before the key.
+        type: str
+        required: false
+        default: CHANGE_ME_VIA_1PASSWORD
+      unifi_network_dhcp_validate_certs:
+        description:
+          - Whether to validate the controller's TLS certificate. The UDM presents a self-signed cert.
+        type: bool
+        required: false
+        default: false
+      unifi_network_dhcp_networks:
+        description:
+          - Desired per-network state. Any setting omitted from an entry is left exactly as the controller has it — this role is a reconciler, not a template.
+        type: list
+        required: false
+        default: []
+        elements: dict
+        options:
+          vlan:
+            description:
+              - VLAN id, matched against the controller's live network objects. The role fails if the VLAN does not exist rather than guessing.
+            type: int
+            required: true
+          dhcpd_enabled:
+            description: Whether the UDM serves DHCP on this network. Set false to hand DHCP authority to Kea — the network keeps its subnet and gateway, it simply stops answering DHCP.
+            type: bool
+            required: false
+          dhcpd_start:
+            description:
+              - First address of the dynamic DHCP pool.
+            type: str
+            required: false
+          dhcpd_stop:
+            description:
+              - Last address of the dynamic DHCP pool.
+            type: str
+            required: false
+          dhcpd_leasetime:
+            description:
+              - DHCP lease lifetime in seconds. Clients renew at T1 (50%), so this sets how quickly a change to handed-out settings — resolvers above all — reaches the fleet.
+            type: int
+            required: false
+          dhcpd_dns:
+            description:
+              - Resolvers handed to clients, in order. Maps to dhcpd_dns_1 through dhcpd_dns_4.
+            type: list
+            required: false
+            elements: str
+          dhcp_relay_enabled:
+            description:
+              - 'Whether this network RELAYS DHCP to an external server instead of serving it locally. Mutually exclusive with dhcpd_enabled: the UDM is either the DHCP server for a network or a relay for it, never both. Always set alongside dhcp_relay_servers — enabling relay with no target silently relays to nothing, which is an outage.'
+            type: bool
+            required: false
+          dhcp_relay_servers:
+            description:
+              - DHCP relay targets. Only meaningful on networks where relay is enabled.
+            type: list
+            required: false
+            elements: str
+      unifi_network_dhcp_apply:
+        description:
+          - When false (the default) the role reports the computed diff and changes nothing.
+          - Set true to PUT the changes. This edits the router every VLAN depends on — always run once with false and read the diff first.
+        type: bool
+        required: false
+        default: false

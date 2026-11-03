@@ -1,0 +1,165 @@
+---
+# service_headscale — a Headscale control server with its embedded DERP relay, behind a traefik that
+# terminates TLS on a single public port.
+#
+# WHY TRAEFIK IN FRONT rather than Headscale's built-in ACME. Headscale's own Let's Encrypt support
+# offers only HTTP-01 (needs :80) and TLS-ALPN-01 (needs :443). On a host where another service
+# already owns both ports, the certificate must come from DNS-01, which Headscale cannot do and
+# traefik can. traefik is part of THIS service, not a shared proxy: it routes one hostname.
+#
+# WHAT RESTARTS WHAT. Headscale reads config.yaml and policy.json at startup, so a change to either
+# recreates it (a restart drops every client's control connection for a few seconds; data-plane
+# WireGuard tunnels between nodes survive). traefik's dynamic file is watched; only a change to its
+# static config or env restarts it.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Run the generated argspec guards
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: HARD GATE — the policy must not be empty
+  # An empty policy file is Headscale's ALLOW-ALL. A caller that forgot to pass one must fail here,
+  # not ship a tailnet where every node can reach every other node and every route.
+  ansible.builtin.assert:
+    that:
+      - headscale_policy | length > 0
+      - "'grants' in headscale_policy or 'acls' in headscale_policy"
+    fail_msg: >-
+      headscale_policy is empty or has no grants/acls section — Headscale would treat that as
+      ALLOW ALL. Declare the policy explicitly.
+    quiet: true
+
+- name: HARD GATE — base_domain must not be the server's domain or a parent of it
+  # Headscale refuses to start otherwise; failing here names the cause instead of a crash loop.
+  ansible.builtin.assert:
+    that:
+      - headscale_base_domain != headscale_server_hostname
+      - not headscale_server_hostname.endswith('.' ~ headscale_base_domain)
+    fail_msg: >-
+      headscale_base_domain '{{ headscale_base_domain }}' equals or is a parent of the server
+      hostname '{{ headscale_server_hostname }}', which Headscale rejects at startup.
+    quiet: true
+
+- name: Ensure the deploy directories exist
+  ansible.builtin.file:
+    path: "{{ headscale_deploy_dir }}/{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "", mode: "0755" }
+    - { path: "config", mode: "0755" }
+    - { path: "lib", mode: "0700" }
+    - { path: "run", mode: "0770" }
+    - { path: "traefik", mode: "0755" }
+    - { path: "letsencrypt", mode: "0700" }
+  loop_control:
+    label: "{{ headscale_deploy_dir }}/{{ item.path }}"
+
+- name: Render Headscale's config and policy
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ headscale_deploy_dir }}/config/{{ item }}"
+    mode: "0644"
+  loop: [config.yaml, policy.json]
+  register: _headscale_conf
+
+- name: Render traefik's static and dynamic config
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ headscale_deploy_dir }}/traefik/{{ item }}"
+    mode: "0644"
+  loop: [traefik.yml, dynamic.yml]
+  register: _headscale_traefik_conf
+
+- name: Write traefik's DNS-01 credential
+  ansible.builtin.copy:
+    content: "CF_DNS_API_TOKEN={{ headscale_cf_dns_api_token }}\n"
+    dest: "{{ headscale_deploy_dir }}/traefik.env"
+    mode: "0600"
+  register: _headscale_traefik_env
+  no_log: true
+
+- name: Ensure the ACME store exists at 0600
+  # traefik refuses an acme.json that is group/world readable. force: false — never truncate a store
+  # that already holds the issued certificate and account key.
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ headscale_deploy_dir }}/letsencrypt/acme.json"
+    mode: "0600"
+    force: false
+
+- name: Render the compose project
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ headscale_deploy_dir }}/docker-compose.yml"
+    mode: "0644"
+  register: _headscale_compose
+
+- name: Bring the stack up
+  community.docker.docker_compose_v2:
+    project_src: "{{ headscale_deploy_dir }}"
+    state: present
+    pull: missing
+  register: _headscale_up
+
+- name: Recreate Headscale when its config or policy changed
+  # It reads both only at startup. Skipped when `up` just created/recreated it anyway.
+  community.docker.docker_compose_v2:
+    project_src: "{{ headscale_deploy_dir }}"
+    services: [headscale]
+    state: restarted
+  when:
+    - _headscale_conf is changed
+    - _headscale_up is not changed
+
+- name: Restart traefik when its static config or credential changed
+  community.docker.docker_compose_v2:
+    project_src: "{{ headscale_deploy_dir }}"
+    services: [traefik]
+    state: restarted
+  when:
+    - (_headscale_traefik_conf.results | selectattr('item', 'equalto', 'traefik.yml') | first) is changed
+      or _headscale_traefik_env is changed
+    - _headscale_up is not changed
+
+- name: Wait for Headscale to answer on loopback
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ headscale_listen_port }}/health"
+    status_code: [200]
+  register: _headscale_health
+  retries: 15
+  delay: 4
+  until: _headscale_health.status | default(0) == 200
+  failed_when: false
+
+- name: HARD GATE — Headscale must be healthy
+  # Explicit assert after the until: loop, which would otherwise exit green once retries ran out.
+  ansible.builtin.assert:
+    that:
+      - _headscale_health.status | default(0) == 200
+    fail_msg: >-
+      Headscale did not answer /health on 127.0.0.1:{{ headscale_listen_port }}
+      (got {{ _headscale_health.status | default('nothing') }}). Read
+      `docker logs headscale-headscale-1` — a config or policy parse error is the usual cause.
+    quiet: true
+
+- name: Read the existing users
+  community.docker.docker_container_exec:
+    container: headscale-headscale-1
+    argv: [headscale, users, list, --output, json]
+  register: _headscale_users_raw
+  changed_when: false
+
+- name: Parse the user list
+  # `null` (no users yet) and `[]` both mean none; anything unparseable fails here rather than
+  # reading as "nobody exists" and creating duplicates.
+  ansible.builtin.set_fact:
+    _headscale_existing_users: "{{ (_headscale_users_raw.stdout | from_json or []) | map(attribute='name') | list }}"
+
+- name: Create the declared users that are missing
+  community.docker.docker_container_exec:
+    container: headscale-headscale-1
+    argv: [headscale, users, create, "{{ item }}"]
+  loop: "{{ headscale_users | difference(_headscale_existing_users) }}"
+  changed_when: true

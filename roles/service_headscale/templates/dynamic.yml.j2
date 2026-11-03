@@ -1,0 +1,14 @@
+# Rendered by roles/service_headscale.
+http:
+  routers:
+    headscale:
+      entryPoints: [headscale]
+      rule: "Host(`{{ headscale_server_hostname }}`)"
+      service: headscale
+      tls:
+        certResolver: le
+  services:
+    headscale:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:{{ headscale_listen_port }}"

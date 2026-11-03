@@ -1,0 +1,17 @@
+---
+- name: Cleanup — stop the scenario's bind9 and remove its directory
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - records_vars.yml
+  tasks:
+    - name: Stop it
+      community.docker.docker_compose_v2:
+        project_src: "{{ rec_dir }}"
+        state: absent
+      failed_when: false
+
+    - name: Remove the directory
+      ansible.builtin.file:
+        path: "{{ rec_dir }}"
+        state: absent

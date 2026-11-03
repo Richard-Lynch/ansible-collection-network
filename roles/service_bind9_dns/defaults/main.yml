@@ -1,0 +1,72 @@
+---
+# service_bind9_dns — authoritative DNS for the caller's zones, optionally forwarding recursion to an
+# upstream resolver (e.g. Pi-hole). Zones are derived from a VLAN model, and a task interface lets
+# SERVICES register their own records (see tasks/add_cname_to_domain.yml etc.).
+
+# --- container ---
+bind9_service_name: bind9
+bind9_config_dir: /opt/bind9
+# Pinned by DIGEST. Newer ubuntu/bind9 tags switched to a `pebble` init that calls setgroups, which
+# FAILS in an unprivileged LXC container ("setgroups: invalid argument"); this image uses
+# docker-entrypoint.sh and works there. A digest is immutable, so every host runs the same build.
+bind9_image: "ubuntu/bind9@sha256:d3cdf209e7664b1d27ac4090a465740dbb848ecf931e8af0576c4764356a1531"
+
+# --- resolver behaviour (only with bind9_recursion: forward-only to an upstream) ---
+# The upstream this bind9 forwards to: a co-located Pi-hole on :5053, or another resolver's IP.
+bind9_forward_ip: "{{ pihole_dns_ip | default('127.0.0.1') }}"
+bind9_forward_port: 5053
+# Explicit forwarder list (each entry "<ip>" or "<ip> port <n>"). When non-empty it REPLACES the single
+# bind9_forward_ip/port pair. For a topology where Pi-hole sits IN FRONT of bind9 but bind9 still
+# recurses: forwarding to Pi-hole would then loop, so name independent upstreams here.
+bind9_forwarders: []
+# Authoritative-only by default: a resolver in front (e.g. Pi-hole) does the recursing and bind9
+# answers only for its own zones. Set true for bind9 to recurse itself via the forwarders above.
+bind9_recursion: false
+bind9_allow_query: "any"
+# Who may AXFR the zones (a BIND address-match list, `;`-terminated). Default: nobody. The caller
+# names its own networks.
+bind9_allow_transfer: "none;"
+bind9_querylog: true
+
+# --- zone defaults (SOA) ---
+# bind9_primary_domain is REQUIRED (no default): the zone this server is authoritative for.
+# The NS/SOA nameserver name follows the `dns` A record every zone is seeded with (see bind9_ns_ip).
+bind9_ns_fqdn: "dns.{{ bind9_primary_domain }}."
+bind9_soa_contact: "hostmaster.{{ bind9_primary_domain }}."
+bind9_zone_ttl: 60
+bind9_soa_refresh: 43200
+bind9_soa_retry: 900
+bind9_soa_expire: 345600
+bind9_soa_minimum: 60
+
+# --- TSIG key for DDNS (from vault) ---
+ddns_tsig_key_name: "dhcp-key"
+ddns_tsig_key_algorithm: "hmac-sha256"
+# ddns_tsig_key_secret is supplied by the caller (e.g. from a vault) — never defaulted here.
+
+# The service-registration TSIG key, used ONLY for the svc.* zones. Kept apart from the DHCP key
+# above so neither writer can touch the other's records; see roles/dns_service_registrar.
+# svc_tsig_key_secret is also supplied by the caller and is never defaulted here — its absence simply means this bind9 serves no svc zones.
+svc_tsig_key_name: "svc-key"
+svc_tsig_key_algorithm: "hmac-sha256"
+
+# --- record-management task interface (present/absent) ---
+bind9_state: "present"
+
+# --- client-facing service port. bind9_dns_service_bind_ip pins bind9 to one host address (e.g. a
+# management address) so it does NOT also grab a service address another DNS server owns. ---
+bind9_dns_service_port: 53
+# Empty = bind on all addresses. Set it to the management address when Pi-hole owns the service
+# address :53 on the same host.
+bind9_dns_service_bind_ip: ""
+
+# --- the host-side zones directory must be writable by the in-container `bind` user (uid 100/gid
+# 101 in the ubuntu/bind9 image, the standard Debian/Ubuntu allocation) or every dynamic UPDATE fails
+# "journal open failed: unexpected error" / SERVFAIL. See tasks/main.yml. ---
+bind9_zones_owner_uid: 100
+bind9_zones_owner_gid: 101
+
+# Whether to hard-gate on the zones directory ownership read-back. Callers previewing via a
+# block-level `check_mode` must set this false: the chown will not have run, so the gate would report
+# the pre-fix ownership and abort a preview that was never meant to change anything.
+bind9_verify_ownership: true

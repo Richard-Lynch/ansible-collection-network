@@ -1,0 +1,154 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/config_vlan_probe/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate config_vlan_probe
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    description:
+      - 'Configure a multi-homed VLAN probe guest: the tooling it needs to send'
+      - link-local traffic (Wake-on-LAN magic packets, ARP checks) on each segment
+      - it has a leg on, and a position assertion that proves each leg really landed
+      - on the VLAN it was tagged for.
+      - ''
+      - 'WHY A POSITION ASSERTION IS PART OF THE ROLE, not an afterthought: a magic'
+      - packet is unacknowledged UDP, so a probe sitting on the WRONG broadcast domain
+      - sends successfully and reports success while waking nothing. Liveness is not
+      - coverage.
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      config_vlan_probe_expected:
+        description:
+          - The segments this guest must be on, one entry per leg.
+          - 'Each: {name, id, address, cidr, gateway}. Derive it in the CALLER from'
+          - the same VLAN data that builds the legs — never copy it by hand.
+        type: list
+        required: true
+        elements: dict
+        options:
+          name:
+            type: str
+            required: true
+          id:
+            type: int
+            required: true
+          address:
+            type: str
+            required: true
+          cidr:
+            type: int
+            required: true
+          gateway:
+            type: str
+            required: true
+      config_vlan_probe_packages:
+        description:
+          - Tooling installed on the probe.
+          - 'NOTE community.general.wakeonlan needs NOTHING here: it builds and'
+          - sends the magic packet from the module's own Python over a UDP socket,
+          - so no etherwake/wakeonlan binary is required.
+          - avahi/gssdp and tcpdump are deliberately NOT included — an unused
+          - daemon on every VLAN is attack surface for a capability nobody asked
+          - for, and avahi-daemon would make the probe an mDNS PARTICIPANT rather
+          - than an observer.
+        type: list
+        required: false
+        default:
+          - iputils-arping
+          - iputils-ping
+          - iproute2
+          - dnsutils
+        elements: str
+      config_vlan_probe_wake_targets:
+        description:
+          - 'Wakeable targets, as {name: {mac, broadcast, port}}. THE ALLOWLIST IS'
+          - 'THE SECURITY MODEL: a caller names an entry and cannot supply a MAC or'
+          - a broadcast address, so the endpoint is a wake button rather than a
+          - packet injector on every segment. Declare them in inventory — they are
+          - installation facts, and the entrypoint asserts each broadcast lands in a
+          - subnet this guest actually holds a leg in, because a send into a
+          - segment it is not on succeeds and wakes nothing.
+          - Empty (default) means the entrypoint refuses to deploy.
+        type: dict
+        required: false
+        default: {}
+      config_vlan_probe_wake_port:
+        description:
+          - TCP port for the HTTP endpoint. Pick one nothing else on the guest uses.
+          - The endpoint has no authentication; restrict who can reach this port.
+        type: int
+        required: false
+        default: 8080
+      config_vlan_probe_wake_unit:
+        description:
+          - systemd unit name for the endpoint. The prefix marks it as
+          - Ansible-managed on the guest; override it to match your own convention.
+        type: str
+        required: false
+        default: iaac-wake-endpoint.service
+      config_vlan_probe_wake_script:
+        description:
+          - Where the endpoint script is installed. Stdlib-only, so there is no
+          - virtualenv and nothing to install beyond python3.
+        type: str
+        required: false
+        default: /usr/local/bin/iaac_wake_endpoint.py
+      config_vlan_probe_relays:
+        description:
+          - UDP broadcasts to carry from one VLAN leg to another, ONE WAY, with the
+          - sender's address preserved so the answer (a unicast) goes straight back
+          - to it. For LAN game discovery, which cannot cross a VLAN. THE LIST IS
+          - 'THE ALLOWLIST: only these ports, legs and directions. Installation config —'
+          - declare in inventory; the entrypoint asserts both legs are held.
+        type: list
+        required: false
+        default: []
+        elements: dict
+        options:
+          name:
+            description: Label, for logs and the status file.
+            type: str
+            required: true
+          port:
+            description: UDP destination port of the broadcast to relay.
+            type: int
+            required: true
+          from_broadcast:
+            description: Broadcast address of the leg it is HEARD on, e.g. 192.0.2.255.
+            type: str
+            required: true
+          to_broadcast:
+            description: Broadcast address of the leg it is RE-EMITTED on.
+            type: str
+            required: true
+      config_vlan_probe_relay_rate:
+        description:
+          - Packets per second the relay re-emits, across all relays — the cap that
+          - stops a flood on one leg being amplified onto another. Discovery is a
+          - handful of packets per refresh.
+        type: int
+        required: false
+        default: 20
+      config_vlan_probe_relay_unit:
+        description: systemd unit name for the relay.
+        type: str
+        required: false
+        default: iaac-broadcast-relay.service
+      config_vlan_probe_relay_script:
+        description: Where the relay script is installed (stdlib-only).
+        type: str
+        required: false
+        default: /usr/local/bin/iaac_broadcast_relay.py
+      config_vlan_probe_apply:
+        description:
+          - false (default) reports what would change and asserts position only.
+          - true installs tooling. Never set from a role default — this is the
+          - explicit act-vs-report gate.
+        type: bool
+        required: false
+        default: false

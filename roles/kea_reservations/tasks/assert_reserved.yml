@@ -1,0 +1,220 @@
+---
+# ENTRYPOINT: refuse to provision a host whose DHCP reservation is not both DECLARED and LIVE.
+#
+# THE POINT. A provisioning play that runs before its host's reservation exists produces a host
+# that leases from the dynamic pool, registers a DDNS name against a pool address, and looks fine —
+# until something downstream hardcodes that address, or the lease moves. A reservation that exists
+# only on a running server (hand-added, never declared) is lost the moment that server is rebuilt,
+# and the host behind it moves.
+#
+# TWO STAGES, AND BOTH ARE LOAD-BEARING:
+#
+#   STAGE 1 (declared) — a well-formed <host>.yml exists in reservations.d.
+#   STAGE 2 (live)     — the running Kea actually holds that reservation.
+#
+# Stage 1 alone proves only that somebody wrote a file. It says nothing about whether Kea would
+# honour it, and the two diverge ROUTINELY: service_kea_dhcp restarts only
+# `when: deployment_config_changed`, so a re-render after a previously-failed run leaves the process
+# serving stale config from memory while every file on disk looks correct. A gate that cannot see
+# that passes in precisely the situation it was built for.
+#
+# STAGE 2 READS THE CONTROL SOCKET, NEVER THE FILE. The on-disk config does NOT prove what the
+# process loaded. For a REPORT a labelled fallback is better than nothing; for a GATE it is worse
+# than nothing: it renders the stale-memory case as a pass. So there is deliberately no fallback
+# here — if the socket cannot be read, this fails.
+
+- name: Load THIS ENTRYPOINT's generated defaults
+  # Ansible auto-loads defaults/main.yml ONLY. The generator writes one defaults file per
+  # entrypoint, so `reservation_expected / reservation_check_live / reservation_kea_host` live in defaults/assert_reserved.yml and are
+  # INVISIBLE to a plain role call. The generated resolver guards each binding with
+  # `if <name>__default is defined`, so without this the options silently resolve to `omit`
+  # instead of their declared defaults — the declared default would be decorative, and
+  # `reservation_check_live` would read as unset rather than as its documented value.
+  #
+  # Loading the entrypoint's own defaults file first makes the declared defaults real.
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/defaults/assert_reserved.yml"
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Enforce the constraints Ansible cannot
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Report a DECLARED exemption and stop
+  # An opt-out that is stated, not one achieved by leaving the guard out of a play. Bootstrap cases
+  # need it — the host that runs Kea cannot gate on the Kea it is about to run — as do consumer devices
+  # that lease normally by design.
+  ansible.builtin.debug:
+    msg: >-
+      Reservation check SKIPPED for '{{ reservation_host }}' by explicit declaration
+      (reservation_expected=false). This host is expected to lease dynamically.
+  when: not (reservation_expected | bool)
+
+- name: Run the reservation gate
+  when: reservation_expected | bool
+  block:
+    # ---- STAGE 1: declared ---------------------------------------------------------------
+    - name: STAGE 1 — locate this host's declaration
+      ansible.builtin.stat:
+        path: "{{ kea_reservations_dir }}/{{ reservation_host }}.yml"
+      register: _resv_stat
+      delegate_to: localhost
+      changed_when: false
+
+    - name: STAGE 1 — HARD GATE, the declaration must exist
+      ansible.builtin.assert:
+        that:
+          - _resv_stat.stat.exists
+        fail_msg: >-
+          NOT DECLARED: {{ kea_reservations_dir }}/{{ reservation_host }}.yml does not exist.
+          Provisioning '{{ reservation_host }}' now would give it a dynamic-pool address that
+          nothing owns.
+          Fix: declare it (tasks_from: declare, or write the file by hand), commit it, then deploy
+          it with the play that runs service_kea_dhcp so Kea actually holds it.
+          If this host is MEANT to lease dynamically, pass reservation_expected=false and say why.
+        success_msg: "'{{ reservation_host }}' is declared in {{ _resv_stat.stat.path | basename }}."
+        quiet: true
+
+    - name: STAGE 1 — read the declaration
+      ansible.builtin.include_vars:
+        file: "{{ kea_reservations_dir }}/{{ reservation_host }}.yml"
+        name: _resv_want
+      delegate_to: localhost
+
+    - name: STAGE 1 — HARD GATE, the declaration must be complete
+      # A half-written file would otherwise pass Stage 1 and then fail Stage 2 with a confusing
+      # "not live" message, sending the reader to look at Kea instead of at the file.
+      ansible.builtin.assert:
+        that:
+          - _resv_want.subnet_id is defined
+          - _resv_want.hw_address is defined
+          - _resv_want.ip_address is defined
+          - _resv_want.hostname is defined
+          - _resv_want.hostname == reservation_host
+        fail_msg: >-
+          MALFORMED: {{ reservation_host }}.yml is missing a required field, or its hostname
+          ('{{ _resv_want.hostname | default("(unset)") }}') does not match the filename.
+          Needs subnet_id, hw_address, ip_address, hostname.
+        success_msg: >-
+          Declaration is complete: {{ _resv_want.ip_address }} ({{ _resv_want.hw_address }})
+          on subnet {{ _resv_want.subnet_id }}.
+        quiet: true
+
+    # ---- STAGE 2: live -------------------------------------------------------------------
+    - name: Run the live half of the gate
+      when: reservation_check_live | bool
+      block:
+        - name: STAGE 2 — ask the RUNNING Kea for its config
+          # Via the control agent's HTTP API on :8000, which proxies to kea-dhcp4's control socket.
+          # The answer therefore reflects MEMORY rather than disk. No fallback: see the header.
+          #
+          # NOT socat, and not a raw unix socket. The Kea image ships NEITHER socat NOR kea-shell
+          # NOR curl — it has `nc` and `python3`. A socat-based reader fails with
+          # "sh: socat: not found", and a reader that then falls back to the on-disk file hides
+          # that failure behind a result that does not prove what the process loaded.
+          #
+          # python3 is the dependency-free option available in the image.
+          #
+          # `failed_when: false` only so the assert below can produce a useful message instead of a
+          # raw command failure — the rc IS checked, immediately after.
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - "{{ reservation_kea_container }}"
+              - python3
+              - -c
+              - >-
+                import urllib.request,json,sys;
+                req=urllib.request.Request('http://127.0.0.1:8000/',
+                data=json.dumps({'command':'config-get','service':['dhcp4']}).encode(),
+                headers={'Content-Type':'application/json'});
+                d=json.loads(urllib.request.urlopen(req,timeout=15).read().decode());
+                sys.exit('control agent returned result=%s' % d[0].get('result'))
+                if d[0].get('result') != 0 else
+                print(json.dumps(d[0]['arguments']))
+          register: _resv_live
+          delegate_to: "{{ reservation_kea_host }}"
+          changed_when: false
+          failed_when: false
+
+        - name: STAGE 2 — HARD GATE, the control socket must answer
+          # Distinct from "the reservation is missing". Conflating the two sends the reader to fix
+          # a file when the real problem is that Kea is down or unreachable.
+          ansible.builtin.assert:
+            that:
+              - _resv_live.rc == 0
+              - (_resv_live.stdout | default('') | trim | length) > 0
+            fail_msg: >-
+              CANNOT VERIFY: Kea's control socket on {{ reservation_kea_host }} did not answer
+              (rc={{ _resv_live.rc }}) {{ _resv_live.stderr | default('') | trim }}.
+              This gate deliberately has NO on-disk fallback — reading the rendered file would
+              report the config Kea loaded LAST time, which passes in exactly the stale-memory case
+              the gate exists to catch.
+              Check the container, then re-run. To provision without the live check (only when
+              there is genuinely no path to Kea), pass reservation_check_live=false.
+            success_msg: "Kea's control socket answered; checking the live reservation set."
+            quiet: true
+
+        - name: STAGE 2 — extract the live reservations for this subnet
+          # Kea emits hw-address LOWERCASE regardless of how it was written, so both sides are
+          # lowercased before comparison. A case-sensitive compare here would never match and the
+          # gate would fail on a perfectly healthy server.
+          # The command above already unwrapped `arguments`, so this is the Dhcp4 config directly.
+          ansible.builtin.set_fact:
+            _resv_live_set: >-
+              {{ (_resv_live.stdout | from_json).Dhcp4.subnet4
+                 | selectattr('id', 'equalto', _resv_want.subnet_id | int)
+                 | map(attribute='reservations') | first | default([], true) }}
+
+        - name: STAGE 2 — HARD GATE, the reservation must be live as an EXACT MAC+IP pair
+          # Matched as a PAIR, not on either half alone:
+          #   * MAC only  — passes a reservation whose address is wrong, so the host gets a
+          #                 different IP than declared and every consumer of the declared one
+          #                 breaks.
+          #   * IP only   — passes a reservation bound to a DIFFERENT machine's MAC, so this host
+          #                 never matches it and leases from the pool while the gate says fine.
+          # A grep for a bare address is adequate for "did the config reload" but would pass both
+          # of the above as a provisioning gate.
+          ansible.builtin.assert:
+            that:
+              - _resv_match | length > 0
+            fail_msg: >-
+              DECLARED BUT NOT LIVE: {{ reservation_host }} is declared as
+              {{ _resv_want.ip_address }} / {{ _resv_want.hw_address | lower }} on subnet
+              {{ _resv_want.subnet_id }}, but the RUNNING Kea does not hold that exact pair.
+              Live on this subnet: {{ _resv_live_set | map(attribute='ip-address') | list }}.
+              {{ 'That address IS live but bound to a DIFFERENT MAC (' ~
+                 (_resv_live_set | selectattr('ip-address', 'eq', _resv_want.ip_address)
+                  | map(attribute='hw-address') | join(', ')) ~ ') — the host would never match it.'
+                 if (_resv_live_set | selectattr('ip-address', 'eq', _resv_want.ip_address) | list | length) > 0
+                 else '' }}
+              {{ 'That MAC IS live but on a DIFFERENT address (' ~
+                 (_resv_live_set | selectattr('hw-address', 'eq', _resv_want.hw_address | lower)
+                  | map(attribute='ip-address') | join(', ')) ~ ') — the host would get that instead.'
+                 if (_resv_live_set | selectattr('hw-address', 'eq', _resv_want.hw_address | lower) | list | length) > 0
+                 else '' }}
+              The file is committed but not deployed: run the play that applies service_kea_dhcp,
+              or restart Kea if the config is already correct on disk and it is serving stale
+              config from memory.
+            success_msg: >-
+              LIVE: Kea holds {{ _resv_want.ip_address }} for {{ _resv_want.hw_address | lower }}
+              ({{ reservation_host }}) on subnet {{ _resv_want.subnet_id }}. Safe to provision.
+            quiet: true
+          vars:
+            _resv_match: >-
+              {{ _resv_live_set
+                 | selectattr('ip-address', 'eq', _resv_want.ip_address)
+                 | selectattr('hw-address', 'defined')
+                 | map(attribute='hw-address') | map('lower')
+                 | select('eq', _resv_want.hw_address | lower) | list }}
+
+    - name: Report that the live half was skipped
+      # Stated rather than silent: a run where Stage 2 did not happen must not read like one where
+      # it passed.
+      ansible.builtin.debug:
+        msg: >-
+          Reservation for '{{ reservation_host }}' is DECLARED, but the live check was skipped
+          (reservation_check_live=false). This does NOT prove Kea holds it.
+      when: not (reservation_check_live | bool)

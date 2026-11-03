@@ -1,0 +1,190 @@
+# Offline scenario: render the REAL templates and assert on the REAL output.
+#
+# All three templates are rendered, kea-dhcp4.conf.template.j2 included: RESERVATION RENDERING is
+# the one thing whose failure silently renumbers a host, so it must be under test.
+#
+# The templates are rendered directly with hand-typed caller vars (render the real template,
+# assert on its output), but the role's own defaults come from its GENERATED defaults rather than
+# a hand-copied mirror, which would be a second source of truth that drifts.
+---
+- name: Converge — render + assert kea config
+  hosts: localhost
+  gather_facts: false
+  vars:
+    render_dir: /tmp/molecule-kea
+    # Role-internal constants (vars/main.yml), not caller options — supplied as the role's own
+    # vars/ would.
+    kea_service_name: kea_dhcp
+    kea_config_dir: /opt/kea_dhcp
+    kea_interface: eth0
+    ddns_tsig_key_name: dhcp-key
+    ddns_tsig_key_algorithm: HMAC-SHA256
+    ddns_tsig_key_secret: "molecule-fake-not-a-real-tsig-key"
+    # REQUIRED options — the resolver deliberately does not bind these, so the caller must.
+    kea_dns_servers:
+      - { ip: "192.0.2.2", port: "53" }
+    kea_service_ip: "192.0.2.2"
+    kea_server_identifier: "192.0.2.2"
+    kea_dns_zone_suffix: "vlans.example.com"
+    kea_option_dns_servers:
+      - { ip: "192.0.2.2", port: "53" }
+    # NOTE no `dns:` key. In the real pipeline `selectattr('dns','undefined')` is what puts a VLAN
+    # into kea_vlans, so a stub carrying `dns:` describes a VLAN that Kea would never serve — an
+    # impossible input.
+    kea_vlans:
+      - { id: 30, name: media, domain_name: vlans.example.com, base: 203.0.113.1, cidr: 24, gateway: 203.0.113.1 }
+      - { id: 40, name: internal, domain_name: vlans.example.com, base: 198.51.100.1, cidr: 24, gateway: 198.51.100.1 }
+    kea_reservations:
+      - { subnet_id: 30, hw_address: "02:00:5E:10:00:01", ip_address: "203.0.113.6", hostname: "media" }
+      - { subnet_id: 40, hw_address: "02:00:5E:10:00:02", ip_address: "198.51.100.3", hostname: "nas" }
+      # Deliberately NO hostname — the template emits the key only when defined, and a caller may
+      # legitimately pin an address without naming it.
+      - { subnet_id: 40, hw_address: "02:00:5E:10:00:03", ip_address: "198.51.100.8" }
+
+  tasks:
+    - name: Load the role's GENERATED defaults
+      # Ansible auto-loads defaults/main.yml for a real role invocation; this scenario renders
+      # templates directly, so it must load them explicitly. Loading the real file (rather than
+      # re-typing values) is what keeps the scenario from becoming a second source of truth.
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../defaults/main.yml"
+
+    - name: Resolve defaults exactly as the role does
+      # The role's own generated resolver — NOT a hand-copied `__default` expansion. If an option
+      # is added to argument_specs.py, this picks it up automatically.
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_resolve_defaults.yml"
+
+    - name: Enforce the generated constraint guards
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_argspec_guards.yml"
+
+    - name: Ensure render dir
+      ansible.builtin.file: { path: "{{ render_dir }}", state: directory, mode: "0755" }
+
+    - name: Render compose
+      ansible.builtin.template:
+        src: "../../files/docker-compose.yml.j2"
+        dest: "{{ render_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Render ddns config
+      ansible.builtin.template:
+        src: "../../files/kea-dhcp-ddns.conf.j2"
+        dest: "{{ render_dir }}/kea-dhcp-ddns.conf"
+        mode: "0644"
+
+    - name: Render the dhcp4 config template
+      # THE ONE THAT MATTERS. Substituting __DDNS_IP__ the way the container entrypoint does, so
+      # what is parsed below is what Kea would actually load.
+      ansible.builtin.template:
+        src: "../../files/kea-dhcp4.conf.template.j2"
+        dest: "{{ render_dir }}/kea-dhcp4.conf.template"
+        mode: "0644"
+
+    - name: Materialise the entrypoint's substitution
+      ansible.builtin.copy:
+        content: "{{ lookup('file', render_dir ~ '/kea-dhcp4.conf.template') | replace('__DDNS_IP__', '127.0.0.1') }}"
+        dest: "{{ render_dir }}/kea-dhcp4.conf"
+        mode: "0644"
+
+    - name: Parse the rendered dhcp4 config as JSON
+      # Kea's config IS JSON, so parsing it is a real syntax check: a template change that produces
+      # a trailing comma or an unquoted value fails HERE rather than taking DHCP down on every subnet.
+      ansible.builtin.set_fact:
+        _cfg: "{{ lookup('file', render_dir ~ '/kea-dhcp4.conf') | from_json }}"
+
+    - name: Index the rendered subnets by id
+      ansible.builtin.set_fact:
+        _subnets: "{{ dict(_cfg.Dhcp4.subnet4 | map(attribute='id') | zip(_cfg.Dhcp4.subnet4)) }}"
+
+    - name: Assert the reservations rendered into the RIGHT subnets
+      # The filter under test is `selectattr('subnet_id','equalto', vlan.id)`. A regression there
+      # would put a reservation in the wrong subnet (or drop it), which Kea accepts happily and
+      # which then renumbers a host at its next renewal.
+      ansible.builtin.assert:
+        that:
+          - _subnets[30].reservations | length == 1
+          - _subnets[40].reservations | length == 2
+          - _subnets[30].reservations[0]['ip-address'] == '203.0.113.6'
+          - _subnets[30].reservations[0]['hw-address'] == '02:00:5E:10:00:01'
+          - _subnets[30].reservations[0].hostname == 'media'
+          - "'198.51.100.3' in (_subnets[40].reservations | map(attribute='ip-address') | list)"
+          - "'198.51.100.8' in (_subnets[40].reservations | map(attribute='ip-address') | list)"
+          - "'203.0.113.6' not in (_subnets[40].reservations | map(attribute='ip-address') | list)"
+        fail_msg: "reservations did not render into the correct subnets: {{ _subnets }}"
+        success_msg: "reservations render per-subnet correctly (30 -> 1, 40 -> 2)"
+        quiet: true
+
+    - name: Assert the optional hostname key is omitted, not emitted empty
+      # `{% if r.hostname is defined %}` — an unconditional emit would produce "hostname": "" and
+      # Kea would register an empty name via DDNS.
+      ansible.builtin.assert:
+        that:
+          - "'hostname' not in (_subnets[40].reservations | selectattr('ip-address', 'eq', '198.51.100.8') | first)"
+          - "'hostname' in (_subnets[40].reservations | selectattr('ip-address', 'eq', '198.51.100.3') | first)"
+        fail_msg: "the optional hostname key is not conditional"
+        success_msg: "hostname is emitted only when supplied"
+        quiet: true
+
+    - name: Assert the pool starts ABOVE the reserved band
+      # The invariant the whole address plan rests on: with kea_pool_offset=10 and base .1, the
+      # pool must start at .11 so every reserved-band address is un-leasable.
+      ansible.builtin.assert:
+        that:
+          - _subnets[30].pools[0].pool == '203.0.113.11 - 203.0.113.251'
+          - _subnets[40].pools[0].pool == '198.51.100.11 - 198.51.100.251'
+        fail_msg: "pool does not start above the reserved band: {{ _subnets[30].pools }}"
+        success_msg: "pools start at .11, above the .2-.10 reserved band"
+        quiet: true
+
+    - name: Assert the settings that keep reservations meaning what the owner expects
+      ansible.builtin.assert:
+        that:
+          # MAC-only matching — a client that changes client-id across reboots still matches.
+          - _cfg.Dhcp4['match-client-id'] == false
+          # NAK rather than ignore, so a renumber is fast and visible.
+          - _cfg.Dhcp4.authoritative == true
+          # option 54 must be the real address, not the docker-internal one.
+          - (_cfg.Dhcp4['option-data'] | selectattr('name', 'eq', 'dhcp-server-identifier') | first).data == '192.0.2.2'
+          - _cfg.Dhcp4['valid-lifetime'] == 7200
+          - _cfg.Dhcp4['ddns-update-on-renew'] == true
+        fail_msg: "a load-bearing Dhcp4 setting did not render as declared"
+        success_msg: "match-client-id, authoritative, server-identifier and DDNS settings all correct"
+        quiet: true
+
+    - name: Assert the conflict-resolution key is ABSENT by default
+      # It is migration-only. Rendering it unconditionally would disable RFC 4703 conflict checking
+      # for every subnet, which is the opposite of the normal setting.
+      ansible.builtin.assert:
+        that:
+          - "'ddns-conflict-resolution-mode' not in _cfg.Dhcp4"
+        fail_msg: "ddns-conflict-resolution-mode rendered when kea_ddns_conflict_mode is empty"
+        success_msg: "conflict-resolution mode correctly absent unless explicitly set"
+        quiet: true
+
+    - name: Assert the DDNS suffix matches the bind9 zone scheme
+      ansible.builtin.assert:
+        that:
+          - _subnets[30]['ddns-qualifying-suffix'] == 'media.vlans.example.com.'
+          - _subnets[40]['ddns-qualifying-suffix'] == 'internal.vlans.example.com.'
+        fail_msg: "ddns-qualifying-suffix does not match the zones bind9 serves"
+        success_msg: "DDNS suffixes match the bind9 zone scheme"
+        quiet: true
+
+    - name: Read back the other two renders
+      ansible.builtin.slurp: { src: "{{ render_dir }}/{{ item }}" }
+      register: _r
+      loop: [docker-compose.yml, kea-dhcp-ddns.conf]
+
+    - name: Assert compose + ddns coherence
+      ansible.builtin.assert:
+        that:
+          - "'kea-dhcp4:2.5.8' in (_r.results[0].content | b64decode)"
+          - "'kea-dhcp-ddns:2.5.8' in (_r.results[0].content | b64decode)"
+          # Bound to the SERVICE address, never the wildcard — a 0.0.0.0 bind receives broadcasts
+          # that bypass the kernel DNAT and reach docker-proxy instead of Kea.
+          - "'192.0.2.2:67:67/udp' in (_r.results[0].content | b64decode)"
+          - "'dhcp-key' in (_r.results[1].content | b64decode)"
+          - "'media.vlans.example.com.' in (_r.results[1].content | b64decode)"
+        fail_msg: "kea render is not coherent"
+        success_msg: "kea render OK: images 2.5.8, DHCP bound to the service IP, DDNS TSIG + forward domain"
+        quiet: true

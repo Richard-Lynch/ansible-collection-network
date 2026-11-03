@@ -1,0 +1,132 @@
+# PROVE EVERY GUARD CAN FAIL.
+#
+# This is the half of the test that matters. converge.yml shows the merge works on good input;
+# a guard that has only ever been run against good input is indistinguishable from a guard that
+# cannot fire.
+#
+# Each case below points the role at a fixture directory containing exactly ONE fault, and asserts
+# the role FAILS. `block/rescue` inverts the sense: reaching the `fail` inside the block means the
+# guard did not fire, which is itself a test failure.
+---
+- name: Verify — every guard fires on its own bad input
+  hosts: localhost
+  gather_facts: false
+  vars:
+    _fx: "{{ playbook_dir }}/fixtures"
+    kea_vlans:
+      - { id: 30, name: media, domain_name: vlans.example.com, base: 203.0.113.1, cidr: 24, gateway: 203.0.113.1 }
+      - { id: 40, name: internal, domain_name: vlans.example.com, base: 198.51.100.1, cidr: 24, gateway: 198.51.100.1 }
+
+  tasks:
+    - name: GUARD — duplicate address must be rejected
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/dup_ip"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — two declarations claimed 198.51.100.3 and the merge accepted it"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — duplicate address rejected" }
+
+    - name: GUARD — duplicate MAC must be rejected, case-insensitively
+      # The fixture writes the same NIC in lowercase. A case-sensitive compare would miss it, and
+      # Kea (which matches on MAC alone) would hold two reservations for one machine.
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/dup_mac"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — one MAC held two reservations (case-insensitive compare failed)"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — duplicate MAC rejected regardless of case" }
+
+    - name: GUARD — a malformed MAC must be rejected
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/bad_mac"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — hyphen-separated MAC accepted"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — malformed MAC rejected" }
+
+    - name: GUARD — a missing rationale must be rejected
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/no_why"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — a declaration with no `why` was accepted"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — missing rationale rejected" }
+
+    - name: GUARD — the rationale requirement must be DISABLEABLE
+      # Proves the toggle works in both directions. A flag that cannot turn the check off is not a
+      # flag, and one that silently never turns it on is worse.
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/no_why"
+            kea_reservations_require_why: false
+        - ansible.builtin.debug: { msg: "PASS — require_why=false permits a declaration with no rationale" }
+      rescue:
+        - ansible.builtin.fail:
+            msg: "require_why=false did NOT disable the check — the toggle is dead"
+
+    - name: GUARD — hostname must match the filename
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/name_mismatch"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — nas.yml declaring hostname 'nass' was accepted"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — hostname/filename mismatch rejected" }
+
+    - name: GUARD — an FQDN hostname must be rejected
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/fqdn"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — an FQDN hostname was accepted and would be double-qualified"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — FQDN hostname rejected" }
+
+    - name: GUARD — a subnet Kea does not serve must be rejected
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/bad_subnet"
+        - ansible.builtin.fail:
+            msg: "GUARD DID NOT FIRE — subnet 99 accepted; the reservation would render nowhere"
+      rescue:
+        - ansible.builtin.debug: { msg: "PASS — unknown subnet rejected" }
+
+    - name: The merge must still SUCCEED on good input
+      # The control case. Without it, a role that failed unconditionally would pass every test
+      # above — eight green "PASS" lines proving only that something, somewhere, raised.
+      block:
+        - ansible.builtin.include_role:
+            name: kea_reservations
+          vars:
+            kea_reservations_dir: "{{ _fx }}/good"
+        - ansible.builtin.assert:
+            that:
+              - kea_reservations | length == 3
+            fail_msg: "good fixtures did not merge cleanly"
+            success_msg: "PASS — good input still merges (3 reservations); the guards are selective"
+            quiet: true
+      rescue:
+        - ansible.builtin.fail:
+            msg: >-
+              THE ROLE FAILS ON GOOD INPUT. Every negative case above is therefore meaningless —
+              they would pass against a role that always raises.

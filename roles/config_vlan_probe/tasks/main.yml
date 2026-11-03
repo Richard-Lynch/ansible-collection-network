@@ -1,0 +1,78 @@
+---
+# Configure a multi-homed VLAN probe and PROVE where each of its legs actually landed.
+#
+# The proving is the point. See the role argspec for why.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Install the link-local tooling
+  # Only under the apply gate — a default run reports position and changes nothing.
+  ansible.builtin.apt:
+    name: "{{ config_vlan_probe_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: config_vlan_probe_apply | bool
+
+- name: Read every address the guest actually holds
+  # THE AUTHORITATIVE SOURCE for "where am I?" is the guest's own interface state, never the
+  # tag we asked the hypervisor for. A guest configured tag=1 lands on whatever the trunk's native
+  # VLAN is (`pve_trunk_native_vlan`, if the caller sets it) — so the tag is a REQUEST and this is
+  # the RESULT.
+  # Reading the request back would assert nothing.
+  ansible.builtin.command:
+    cmd: ip -4 -oneline address show
+  register: _probe_addr
+  changed_when: false
+
+- name: Extract the addresses, exactly
+  # Whole-token match on the CIDR address. A substring test ('192.0.2.2' in stdout) would also
+  # match 192.0.2.255 and 192.0.2.25. `\S+` after the address
+  # keeps the prefix length attached so the compare below is address-and-mask, not address.
+  ansible.builtin.set_fact:
+    _probe_held: >-
+      {{ _probe_addr.stdout
+         | regex_findall('inet\s+(\d+\.\d+\.\d+\.\d+/\d+)')
+         | sort }}
+
+- name: Report what each leg holds against what it was asked to hold
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} (tag {{ item.id }}): expected {{ item.address }}/{{ item.cidr }} —
+      {{ 'PRESENT' if (item.address ~ '/' ~ item.cidr) in _probe_held else 'ABSENT' }}
+  loop: "{{ config_vlan_probe_expected }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Assert every expected leg is actually held
+  # THE GUARD THAT TURNS LIVENESS INTO COVERAGE.
+  #
+  # A probe that is UP but on the wrong broadcast domain is worse than an absent one: it reads
+  # as coverage while sending magic packets into the wrong segment, succeeding every time
+  # (unacknowledged UDP) and waking nothing — a silent guard introduced by the very thing meant
+  # to provide coverage.
+  #
+  # PROVEN CAPABLE OF FAILING: add a VLAN to the expected list that the guest has no leg on and
+  # this fires naming it.
+  #
+  # Compares against addresses READ FROM THE GUEST, so a mis-tagged leg cannot satisfy it: the
+  # address for a VLAN cannot appear unless the guest is genuinely in that VLAN's subnet.
+  ansible.builtin.assert:
+    that:
+      - _missing | length == 0
+    fail_msg: >-
+      PROBE IS NOT WHERE IT CLAIMS TO BE — missing legs: {{ _missing | join(', ') }}.
+      Held: {{ _probe_held | join(', ') }}.
+      Do NOT treat these VLANs as covered. Check the `tag:` on each netif, and remember a
+      guest tagged 1 lands on the trunk's native VLAN ({{ pve_trunk_native_vlan | default('?') }}),
+      not VLAN 1.
+    success_msg: >-
+      All {{ config_vlan_probe_expected | length }} legs verified against the guest's own
+      interface state: {{ _probe_held | join(', ') }}
+    quiet: true
+  vars:
+    _missing: >-
+      {{ config_vlan_probe_expected
+         | rejectattr('address', 'in', _probe_held | map('regex_replace', '/.*$', '') | list)
+         | map(attribute='name') | list }}

@@ -1,0 +1,5 @@
+roles/config_vlan_probe/files/broadcast_relay.py shebang
+roles/config_vlan_probe/files/broadcast_relay.py pylint:disallowed-name
+roles/config_vlan_probe/files/test_broadcast_relay.py shebang
+roles/config_vlan_probe/files/test_broadcast_relay.py pylint:disallowed-name
+roles/config_vlan_probe/files/wake_endpoint.py shebang

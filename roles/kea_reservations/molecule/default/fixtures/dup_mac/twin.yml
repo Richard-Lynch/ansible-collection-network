@@ -1,0 +1,7 @@
+---
+subnet_id: 40
+hw_address: "02:00:5e:10:00:02"
+ip_address: "198.51.100.4"
+hostname: "twin"
+why: >-
+  Same NIC as nas but lowercase, to prove the MAC compare is case-insensitive.

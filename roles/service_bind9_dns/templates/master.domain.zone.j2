@@ -1,0 +1,13 @@
+$TTL {{ bind9_zone_ttl }}	; {{ (bind9_zone_ttl / 60) | int }} minute(s)
+$ORIGIN {{ bind9_domain }}.
+@				IN				SOA				{{ bind9_ns_fqdn }}				{{ bind9_soa_contact }} (
+																					{{ bind9_zone_serial | default(bind9_default_serial) }} ; serial
+																					{{ bind9_soa_refresh }}      ; refresh
+																					{{ bind9_soa_retry }}        ; retry
+																					{{ bind9_soa_expire }}     ; expire
+																					{{ bind9_soa_minimum }}         ; minimum
+																				)
+@				IN				NS				{{ bind9_ns_fqdn }}
+{# Base A record for the nameserver itself lives in the primary zone. Service records are appended by
+   add_cname_to_domain / add_host_to_domain (managed blocks). #}
+dns				IN				A				{{ bind9_dns_ip | default(bind9_ns_ip) }}

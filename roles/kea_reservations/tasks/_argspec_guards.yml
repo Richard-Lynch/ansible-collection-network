@@ -1,0 +1,33 @@
+---
+# GENERATED from roles/kea_reservations/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate kea_reservations
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — reservation_host must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "reservation_host | default('') | length >= 1"
+    fail_msg: "reservation_host violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: {{ reservation_host | default('(unset)') }}"
+    quiet: true
+  when: reservation_host is defined
+
+- name: "GUARD (generated) — reservation_mac must be matching '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'"
+  ansible.builtin.assert:
+    that:
+      - "reservation_mac | default('') is match('^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')"
+    fail_msg: "reservation_mac violates a constraint declared in meta/argument_specs.py: must be matching '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'. Got: {{ reservation_mac | default('(unset)') }}"
+    quiet: true
+  when: reservation_mac is defined
+
+- name: "GUARD (generated) — reservation_why must be at least 10 long"
+  ansible.builtin.assert:
+    that:
+      - "reservation_why | default('') | length >= 10"
+    fail_msg: "reservation_why violates a constraint declared in meta/argument_specs.py: must be at least 10 long. Got: {{ reservation_why | default('(unset)') }}"
+    quiet: true
+  when: reservation_why is defined

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Merge one-file-per-host Kea DHCP reservations into a validated list for service_kea_dhcp, and
+    gate provisioning on a reservation being both declared and live. Writes nothing.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [dhcp, kea, networking]
+dependencies: []

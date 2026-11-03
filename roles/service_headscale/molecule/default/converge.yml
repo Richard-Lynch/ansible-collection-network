@@ -1,0 +1,75 @@
+# Render the role's templates with the role's OWN defaults resolver, then call the real role with
+# bad inputs and require its guards to refuse them.
+---
+- name: Converge (render-only)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    headscale_server_hostname: hs.example.test
+    headscale_server_port: 8443
+    headscale_public_ipv4: 192.0.2.10
+    headscale_ipv4_prefix: 100.64.0.0/16
+    headscale_base_domain: ts.example.test
+    headscale_split_dns: { example.test: ["192.0.2.2"] }
+    headscale_acme_email: test@example.test
+    headscale_cf_dns_api_token: TEST_TOKEN_NOT_REAL
+    headscale_policy:
+      tagOwners: { "tag:router": ["u@"] }
+      autoApprovers:
+        { routes: { "192.0.2.0/24": ["tag:router"] }, exitNode: ["tag:router"] }
+      grants: [{ src: ["autogroup:member"], dst: ["192.0.2.0/24"], ip: ["*"] }]
+    _render_dir: /tmp/molecule-headscale-render
+  tasks:
+    - name: Load the role's generated defaults
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../defaults/main.yml"
+
+    - name: Resolve options exactly as the role does
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../../tasks/_resolve_defaults.yml"
+
+    - name: Ensure the render dir exists
+      ansible.builtin.file:
+        path: "{{ _render_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Render every template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../templates/{{ item }}.j2"
+        dest: "{{ _render_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        [config.yaml, policy.json, docker-compose.yml, traefik.yml, dynamic.yml]
+
+    - name: GUARD — an empty policy must be refused
+      block:
+        - name: Call the role with an empty policy
+          ansible.builtin.include_role:
+            name: service_headscale
+          vars:
+            headscale_policy: {}
+        - name: The guard did not fire
+          ansible.builtin.fail:
+            msg: "service_headscale accepted an EMPTY policy — Headscale would run allow-all."
+      rescue:
+        - name: Require the policy guard was what failed
+          ansible.builtin.assert:
+            that: ["'ALLOW ALL' in ansible_failed_result.msg | default('')"]
+            fail_msg: "Failed for the wrong reason: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"
+
+    - name: GUARD — a base_domain that is a parent of the server name must be refused
+      block:
+        - name: Call the role with base_domain = the server's parent domain
+          ansible.builtin.include_role:
+            name: service_headscale
+          vars:
+            headscale_base_domain: example.test
+        - name: The guard did not fire
+          ansible.builtin.fail:
+            msg: "service_headscale accepted a base_domain Headscale rejects at startup."
+      rescue:
+        - name: Require the base_domain guard was what failed
+          ansible.builtin.assert:
+            that:
+              ["'Headscale rejects' in ansible_failed_result.msg | default('')"]
+            fail_msg: "Failed for the wrong reason: {{ ansible_failed_result.msg | default(ansible_failed_result) }}"

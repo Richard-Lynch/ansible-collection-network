@@ -1,0 +1,9 @@
+---
+# Bridge the generated `<name>__default` vars onto the names the tasks use (house convention —
+# defaults/main.yml is GENERATED from meta/argument_specs.py and carries the suffix).
+- name: Setup vars — resolve defaults
+  ansible.builtin.set_fact:
+    unifi_network_apply: "{{ unifi_network_apply | default(unifi_network_apply__default) }}"
+    unifi_network_site: "{{ unifi_network_site | default(unifi_network_site__default) }}"
+    unifi_network_validate_certs: >-
+      {{ unifi_network_validate_certs | default(unifi_network_validate_certs__default) }}

@@ -1,0 +1,34 @@
+---
+# GENERATED from roles/service_wireguard_peer/meta/argument_specs.py — DO NOT EDIT.
+# Regenerate with: venv/bin/python tools/argspec/cli.py x generate service_wireguard_peer
+#
+# These are the constraints Ansible's role-argspec validator CANNOT enforce. It handles
+# type/required/choices/no_log, but has no numeric-range, length or pattern checking, so
+# without this file those declarations would be decorative.
+#
+# Include from the role's entrypoints:  - ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: "GUARD (generated) — wireguard_address must be matching '^[0-9a-fA-F:.]+/[0-9]{1,3}$'"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_address | default('') is match('^[0-9a-fA-F:.]+/[0-9]{1,3}$')"
+    fail_msg: "wireguard_address violates a constraint declared in meta/argument_specs.py: must be matching '^[0-9a-fA-F:.]+/[0-9]{1,3}$'. Got: {{ wireguard_address | default('(unset)') }}"
+    quiet: true
+  when: wireguard_address is defined
+
+- name: "GUARD (generated) — wireguard_mtu must be >= 1280; <= 1420"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_mtu | int >= 1280"
+      - "wireguard_mtu | int <= 1420"
+    fail_msg: "wireguard_mtu violates a constraint declared in meta/argument_specs.py: must be >= 1280; <= 1420. Got: {{ wireguard_mtu | default('(unset)') }}"
+    quiet: true
+  when: wireguard_mtu is defined
+
+- name: "GUARD (generated) — wireguard_private_key must be at least 1 long"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_private_key | default('') | length >= 1"
+    fail_msg: "wireguard_private_key violates a constraint declared in meta/argument_specs.py: must be at least 1 long. Got: (value suppressed — no_log)"
+    quiet: true
+  when: wireguard_private_key is defined

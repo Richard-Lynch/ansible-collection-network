@@ -1,0 +1,75 @@
+---
+# Remove a WireGuard peer configuration. THE ROLLBACK PATH — the one that gets run at 1am, so it
+# carries the same gates as configuration rather than fewer.
+#
+# Its own confirm var (wireguard_teardown_confirm), deliberately NOT wireguard_apply: destruction
+# should never ride on the same flag as configuration, or a copy-pasted apply command becomes a
+# destroy command.
+
+- name: Resolve vars
+  ansible.builtin.include_tasks: _setup_vars.yml
+
+- name: Report
+  ansible.builtin.debug:
+    msg:
+      - "host      : {{ inventory_hostname }}"
+      - "interface : {{ wireguard_interface }} — would be brought DOWN and its config removed"
+      - "{{ 'DRY RUN — nothing removed. Re-run with wireguard_teardown_confirm=true.' if not (wireguard_teardown_confirm | default(false) | bool) else 'REMOVING.'
+        }}"
+
+- name: Remove the peer
+  when: wireguard_teardown_confirm | default(false) | bool
+  block:
+    - name: Read the default route BEFORE teardown
+      # So the postcondition can prove teardown did not disturb it. Removing a tunnel should be
+      # invisible to everything else on the host.
+      ansible.builtin.command:
+        argv: [ip, -o, route, show, default]
+      register: _td_route_before
+      changed_when: false
+      check_mode: false
+
+    - name: Stop and disable the interface
+      ansible.builtin.systemd:
+        name: "wg-quick@{{ wireguard_interface }}"
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Remove the configuration and key
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/etc/wireguard/{{ wireguard_interface }}.conf"
+        - "/etc/wireguard/{{ wireguard_interface }}.key"
+
+    - name: Confirm the interface is gone
+      ansible.builtin.command:
+        argv: [ip, -o, link, show, type, wireguard]
+      register: _td_links
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read the default route AFTER teardown
+      ansible.builtin.command:
+        argv: [ip, -o, route, show, default]
+      register: _td_route_after
+      changed_when: false
+      check_mode: false
+
+    - name: HARD GATE — the interface must be gone and the default route untouched
+      vars:
+        _names: "{{ (_td_links.stdout_lines | default([])) | map('regex_search', '^[0-9]+:\\s*([^:@]+)', '\\1') | map('first') | map('trim') | list }}"
+      ansible.builtin.assert:
+        that:
+          - "wireguard_interface not in _names"
+          # No default() fallback on _td_route_after: defaulting it to _td_route_before would make
+          # this comparison trivially true and the guard meaningless. It is registered above.
+          - "(_td_route_before.stdout | default('')) == (_td_route_after.stdout | default('__UNREGISTERED__'))"
+        fail_msg: >-
+          Teardown incomplete: {{ wireguard_interface }} still present ({{ _names }}) or the default
+          route changed. Remove by hand: wg-quick down {{ wireguard_interface }}
+        success_msg: "Interface removed; default route unchanged."
+        quiet: true

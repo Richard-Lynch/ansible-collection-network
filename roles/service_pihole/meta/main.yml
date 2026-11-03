@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  namespace: richard_lynch
+  author: Richard Lynch
+  description: >-
+    Deploy Pi-hole in a container with a pinned image, its v6 FTLCONF settings, adlists and upstream
+    resolvers, and a web password supplied by the caller.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.19"
+  galaxy_tags: [dns, pihole, adblock, networking]
+dependencies: []

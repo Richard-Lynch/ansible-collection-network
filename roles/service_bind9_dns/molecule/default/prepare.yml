@@ -1,0 +1,118 @@
+---
+# The record task interface against a REAL bind9 (the role's own pinned image), because the defect
+# it covers only exists in a running server: a dynamic zone is journaled and bind9 rewrites its file,
+# so a test that only renders files cannot see it. Two zones, one of each kind the role handles:
+#   static.test  allow-update { none; }     -> blockinfile, as before
+#   dyn.test     allow-update { key ...; }  -> the infrastructure exception over RFC 2136
+#                                              (_dynamic_record.yml); anything else NOT written, a
+#                                              present record checked read-only (_dynamic_skip.yml)
+# bind9_config_dir is a compose project, so the role's own `Restart bind9` handler works here too.
+# Seeds two names: old-infra (an infrastructure-exception name to retire over RFC 2136) and
+# kea-owned (a name Kea registered, which the role must leave exactly as it is).
+- name: Prepare — a real bind9 with a static and a dynamic zone
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - records_vars.yml
+  tasks:
+    - name: The scenario's bind9 directory (zones writable by the container's bind user, test only)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0777"
+      loop:
+        - "{{ rec_dir }}"
+        - "{{ rec_dir }}/config"
+        - "{{ rec_dir }}/zones"
+
+    - name: named.conf (one static zone, one dynamic zone, the update key)
+      ansible.builtin.copy:
+        dest: "{{ rec_dir }}/config/named.conf"
+        mode: "0644"
+        content: |
+          options {
+              directory "/var/cache/bind";
+              recursion no;
+              allow-query { any; };
+              listen-on { any; };
+              listen-on-v6 { none; };
+          };
+          key "{{ ddns_tsig_key_name }}" {
+              algorithm {{ ddns_tsig_key_algorithm }};
+              secret "{{ ddns_tsig_key_secret }}";
+          };
+          zone "static.test" {
+              type master;
+              file "/etc/bind/zones/static.test.zone";
+              allow-update { none; };
+          };
+          zone "dyn.test" {
+              type master;
+              file "/etc/bind/zones/dyn.test.zone";
+              allow-update { key {{ ddns_tsig_key_name }}; };
+          };
+
+    - name: The two zone files (SOA and NS only)
+      ansible.builtin.copy:
+        dest: "{{ rec_dir }}/zones/{{ item }}.zone"
+        mode: "0666"
+        force: false
+        content: |
+          $TTL 3600
+          @   IN SOA ns.{{ item }}. admin.{{ item }}. 1 3600 600 86400 60
+          @   IN NS  ns.{{ item }}.
+          ns  IN A   127.0.0.1
+      loop: [static.test, dyn.test]
+
+    - name: The compose project (the role's handler restarts it by project_src)
+      ansible.builtin.copy:
+        dest: "{{ rec_dir }}/docker-compose.yml"
+        mode: "0644"
+        content: |
+          services:
+            bind9:
+              image: {{ rec_image }}
+              ports:
+                - "127.0.0.1:{{ rec_port }}:53/udp"
+                - "127.0.0.1:{{ rec_port }}:53/tcp"
+              volumes:
+                - ./config/named.conf:/etc/bind/named.conf:ro
+                - ./zones:/etc/bind/zones
+
+    - name: Start it
+      community.docker.docker_compose_v2:
+        project_src: "{{ rec_dir }}"
+        state: present
+
+    - name: Wait until both zones answer
+      ansible.builtin.command:
+        argv: [dig, -p, "{{ rec_port }}", "@127.0.0.1", "{{ item }}", SOA, +short, +time=2, +tries=1]
+      register: _soa
+      until: _soa.rc == 0 and (_soa.stdout | length) > 0 and not (_soa.stdout is search(';;'))
+      retries: 30
+      delay: 2
+      changed_when: false
+      failed_when: false
+      loop: [static.test, dyn.test]
+
+    - name: HARD GATE — bind9 serves both zones
+      ansible.builtin.assert:
+        that: (_soa.results | rejectattr('rc', 'equalto', 0) | list | length) == 0 and (_soa.results | selectattr('stdout', 'equalto', '') | list | length) == 0
+        fail_msg: "bind9 did not come up: {{ _soa.results | map(attribute='stdout') | list }}"
+        quiet: true
+
+    - name: Seed the dynamic zone (two names as Kea would have registered them)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          k=$(mktemp)
+          trap 'rm -f "$k"' EXIT
+          printf 'key "%s" {\n algorithm %s;\n secret "%s";\n};\n' '{{ ddns_tsig_key_name }}' '{{ ddns_tsig_key_algorithm }}' '{{ ddns_tsig_key_secret }}' > "$k"
+          nsupdate -k "$k" <<'EOF'
+          server 127.0.0.1 {{ rec_port }}
+          zone dyn.test
+          update add old-infra.dyn.test 3600 A 198.18.0.99
+          update add kea-owned.dyn.test 3600 A 198.18.0.50
+          send
+          EOF
+      changed_when: true

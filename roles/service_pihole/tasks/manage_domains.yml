@@ -1,0 +1,249 @@
+---
+# service_pihole — manage_domains: reconcile allow/deny domain rules via the Pi-hole v6 REST API.
+#
+# WHY THIS EXISTS: domain rules added in the web UI live only in the gravity database, which does
+# not survive a rebuild or a move to a new host. This task file makes pihole_allow_domains /
+# pihole_deny_domains (repo vars, vaulted-friendly, reviewable) the SOURCE OF TRUTH: it reads the
+# live rules, computes exactly what to add/remove, reports the diff, and — only when
+# pihole_domains_apply=true — reconciles via POST/DELETE. A second run against an already-reconciled
+# Pi-hole computes zero changes.
+#
+# Deliberately declarative-diff, not "clear everything and re-add": Pi-hole's domain list can carry
+# entries this role does not own (comment/group metadata a human added by hand in the web UI). This
+# role only ever adds what's missing and removes what's IN the repo lists' combined namespace but no
+# longer listed — it will not touch a rule of the opposite type/kind that happens to share a pattern.
+#
+# EXACT (pihole_allow_domains/pihole_deny_domains) and REGEX (pihole_allow_regex/pihole_deny_regex)
+# are both managed, as two kinds of the same {type, kind, domain} shape the API already uses — kept
+# together (not split into a second task file) because the diff/add/remove/verify logic is identical
+# for both, just keyed on `kind` instead of hardcoded to "exact". A rule such as "(\.|^)example\.com$"
+# is a regex rule, not a plain domain — coercing it into an exact-match rule would silently change
+# what it matches (an exact rule for that literal string matches nothing a real client ever
+# queries), so this task file speaks regex to carry such rules faithfully.
+#
+# GENERATE-DON'T-APPLY: reports the diff and changes nothing unless pihole_domains_apply=true.
+
+- name: Manage domains — assert a web password was supplied
+  ansible.builtin.assert:
+    that:
+      - pihole_web_password != "CHANGE_ME_VIA_1PASSWORD"
+      - pihole_web_password | length > 0
+    fail_msg: "pihole_web_password must be supplied (from your secrets manager) to call the Pi-hole API."
+    quiet: true
+
+- name: Manage domains — authenticate and get a session id
+  # no_log: the password is in the request body, and a FAILED uri task logs its arguments (and
+  # -vvv prints them unasked); the response carries the session id, itself a credential. Errors
+  # stay debuggable without it: failed_when is false and the assert below reports the status and
+  # Pi-hole's own message from the registered result, which no_log does not hide.
+  ansible.builtin.uri:
+    url: "https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port }}/api/auth"
+    method: POST
+    body_format: json
+    body:
+      password: "{{ pihole_web_password }}"
+    validate_certs: false
+    status_code: [200]
+  register: _pihole_auth
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Manage domains — assert the session is valid
+  ansible.builtin.assert:
+    that:
+      - _pihole_auth.json.session.valid | default(false)
+      - (_pihole_auth.json.session.sid | default('')) | length > 0
+    fail_msg: >-
+      Pi-hole auth did not return a valid session (HTTP {{ _pihole_auth.status | default('none') }},
+      message: {{ _pihole_auth.json.session.message | default(_pihole_auth.msg | default('none')) }}). Check pihole_web_password against
+      the password Pi-hole was deployed with.
+    quiet: true
+
+- name: Manage domains — set the session id fact
+  ansible.builtin.set_fact:
+    _pihole_sid: "{{ _pihole_auth.json.session.sid }}"
+
+- name: Manage domains — fetch the live domain rules
+  ansible.builtin.uri:
+    url: "https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port }}/api/domains"
+    method: GET
+    headers:
+      X-FTL-SID: "{{ _pihole_sid }}"
+    validate_certs: false
+    status_code: [200]
+  register: _pihole_live_domains
+  changed_when: false
+
+- name: Manage domains — build the desired state (exact + regex, both kinds the API supports)
+  # Plain Jinja construction (not a filter plugin) so the shape is obvious: one dict per rule, with
+  # the API's own {type, kind, domain} vocabulary. Four repo lists map onto the four (type, kind)
+  # combinations the API exposes; kind is stamped per-list rather than inferred from the pattern, so
+  # an accidentally regex-looking exact domain is never silently reinterpreted.
+  ansible.builtin.set_fact:
+    _pihole_wanted_flat: >-
+      {{ (pihole_allow_domains | default([])
+          | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'allow', 'kind': 'exact'}) | list)
+         +
+         (pihole_deny_domains | default([])
+          | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'deny', 'kind': 'exact'}) | list)
+         +
+         (pihole_allow_regex | default([])
+          | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'allow', 'kind': 'regex'}) | list)
+         +
+         (pihole_deny_regex | default([])
+          | map('community.general.dict_kv', 'domain') | map('combine', {'type': 'deny', 'kind': 'regex'}) | list) }}
+
+- name: Manage domains — index the live exact + regex rules (the two kinds this role manages)
+  ansible.builtin.set_fact:
+    _pihole_live_flat: >-
+      {{ _pihole_live_domains.json.domains | default([])
+         | selectattr('kind', 'in', ['exact', 'regex']) | list }}
+
+- name: Manage domains — compute what must be ADDED (wanted, not live under the same type+kind)
+  ansible.builtin.set_fact:
+    _pihole_to_add: >-
+      {{ _pihole_wanted_flat
+         | rejectattr('domain', 'in', (_pihole_live_flat | selectattr('type', 'equalto', 'allow')
+                                        | selectattr('kind', 'equalto', 'exact')
+                                        | map(attribute='domain') | list))
+         | selectattr('type', 'equalto', 'allow') | selectattr('kind', 'equalto', 'exact') | list
+         +
+         _pihole_wanted_flat
+         | rejectattr('domain', 'in', (_pihole_live_flat | selectattr('type', 'equalto', 'deny')
+                                        | selectattr('kind', 'equalto', 'exact')
+                                        | map(attribute='domain') | list))
+         | selectattr('type', 'equalto', 'deny') | selectattr('kind', 'equalto', 'exact') | list
+         +
+         _pihole_wanted_flat
+         | rejectattr('domain', 'in', (_pihole_live_flat | selectattr('type', 'equalto', 'allow')
+                                        | selectattr('kind', 'equalto', 'regex')
+                                        | map(attribute='domain') | list))
+         | selectattr('type', 'equalto', 'allow') | selectattr('kind', 'equalto', 'regex') | list
+         +
+         _pihole_wanted_flat
+         | rejectattr('domain', 'in', (_pihole_live_flat | selectattr('type', 'equalto', 'deny')
+                                        | selectattr('kind', 'equalto', 'regex')
+                                        | map(attribute='domain') | list))
+         | selectattr('type', 'equalto', 'deny') | selectattr('kind', 'equalto', 'regex') | list }}
+
+- name: Manage domains — compute what must be REMOVED (this role's own entries no longer wanted)
+  # SCOPE: only ever removes an exact/regex rule whose domain appears in EITHER
+  # pihole_allow_domains/pihole_deny_domains/pihole_allow_regex/pihole_deny_regex' combined
+  # historical footprint is not tracked here (no state file), so to stay safely declarative without
+  # adopting domains this role never added, removal is restricted to: live rules whose (domain) is
+  # not in the CURRENT wanted set AND whose comment marks them as repo-managed. Rules without that
+  # marker (added by hand, or by a human via the web UI) are left alone — this role reconciles ITS
+  # OWN entries, not the whole table.
+  ansible.builtin.set_fact:
+    _pihole_to_remove: >-
+      {{ _pihole_live_flat
+         | selectattr('comment', 'defined')
+         | selectattr('comment', 'equalto', pihole_domains_managed_comment)
+         | rejectattr('domain', 'in', (_pihole_wanted_flat | map(attribute='domain') | list))
+         | list }}
+
+- name: Manage domains — report the computed diff
+  ansible.builtin.debug:
+    msg:
+      - "ADD ({{ _pihole_to_add | length }}): {{ _pihole_to_add | map(attribute='type') | zip(_pihole_to_add | map(attribute='kind'), _pihole_to_add | map(attribute='domain'))
+        | map('join', '/') | list }}"
+      - "REMOVE ({{ _pihole_to_remove | length }}): {{ _pihole_to_remove | map(attribute='domain') | list }}"
+      - "unchanged/untouched (not repo-managed or already correct): {{ (_pihole_live_flat | length) - (_pihole_to_remove | length) }}"
+
+- name: Manage domains — report that nothing will be applied (generate-don't-apply)
+  ansible.builtin.debug:
+    msg: >-
+      pihole_domains_apply=false — nothing was changed on Pi-hole. Review the diff above, then
+      re-run with pihole_domains_apply=true to reconcile.
+  when: not (pihole_domains_apply | default(false) | bool)
+
+- name: Manage domains — ADD missing domain rules
+  ansible.builtin.uri:
+    url: >-
+      https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port
+      }}/api/domains/{{ item.type }}/{{ item.kind }}
+    method: POST
+    headers:
+      X-FTL-SID: "{{ _pihole_sid }}"
+    body_format: json
+    body:
+      domain: "{{ item.domain }}"
+      comment: "{{ pihole_domains_managed_comment }}"
+      enabled: true
+    validate_certs: false
+    status_code: [201]
+  loop: "{{ _pihole_to_add }}"
+  loop_control:
+    label: "{{ item.type }}/{{ item.kind }} {{ item.domain }}"
+  register: _pihole_added
+  changed_when: true
+  failed_when: false
+  when: pihole_domains_apply | default(false) | bool
+
+- name: Manage domains — REMOVE domain rules no longer in the repo list
+  ansible.builtin.uri:
+    url: >-
+      https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port
+      }}/api/domains/{{ item.type }}/{{ item.kind }}/{{ item.domain | urlencode }}
+    method: DELETE
+    headers:
+      X-FTL-SID: "{{ _pihole_sid }}"
+    validate_certs: false
+    status_code: [204]
+  loop: "{{ _pihole_to_remove }}"
+  loop_control:
+    label: "{{ item.type }}/{{ item.kind }} {{ item.domain }}"
+  register: _pihole_removed
+  changed_when: true
+  failed_when: false
+  when: pihole_domains_apply | default(false) | bool
+
+- name: Manage domains — report any ADD/REMOVE that failed (NOT hidden by no_log)
+  ansible.builtin.debug:
+    msg:
+      - "Failed adds: {{ (_pihole_added.results | default([]) | rejectattr('status', 'equalto', 201) | map(attribute='item.domain') | list) }}"
+      - "Failed removes: {{ (_pihole_removed.results | default([]) | rejectattr('status', 'equalto', 204) | map(attribute='item.domain') | list) }}"
+  when: pihole_domains_apply | default(false) | bool
+
+- name: Manage domains — re-fetch live domain rules to verify (never trust the write rc alone)
+  ansible.builtin.uri:
+    url: "https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port }}/api/domains"
+    method: GET
+    headers:
+      X-FTL-SID: "{{ _pihole_sid }}"
+    validate_certs: false
+    status_code: [200]
+  register: _pihole_after
+  changed_when: false
+  when:
+    - pihole_domains_apply | default(false) | bool
+    - (_pihole_to_add | length) + (_pihole_to_remove | length) > 0
+
+- name: Manage domains — HARD GATE — every wanted rule must now be live
+  ansible.builtin.assert:
+    that:
+      - item.domain in (_pihole_after.json.domains | selectattr('type', 'equalto', item.type) | selectattr('kind', 'equalto', item.kind) |
+        map(attribute='domain') | list)
+    fail_msg: >-
+      {{ item.type }}/{{ item.kind }} rule for {{ item.domain }} did not take — read-back does not
+      show it. Check the ADD task output above for the actual API error (not hidden — see the
+      failed-adds report).
+    quiet: true
+  loop: "{{ _pihole_wanted_flat }}"
+  loop_control:
+    label: "{{ item.type }}/{{ item.kind }} {{ item.domain }}"
+  when:
+    - pihole_domains_apply | default(false) | bool
+    - (_pihole_to_add | length) + (_pihole_to_remove | length) > 0
+
+- name: Manage domains — log out the API session (hygiene)
+  ansible.builtin.uri:
+    url: "https://{{ pihole_api_host | default('127.0.0.1') }}:{{ pihole_web_https_port }}/api/auth"
+    method: DELETE
+    headers:
+      X-FTL-SID: "{{ _pihole_sid }}"
+    validate_certs: false
+    status_code: [200, 204]
+  changed_when: false
+  failed_when: false

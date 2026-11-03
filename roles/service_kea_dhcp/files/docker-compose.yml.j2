@@ -1,0 +1,66 @@
+services:
+  {{ kea_service_name }}:
+    image: docker.cloudsmith.io/isc/docker/kea-dhcp4:{{ kea_dhcp4_image_version | default(kea_dhcp4_image_version__default) }}
+    container_name: {{ kea_service_name }}
+    restart: unless-stopped
+    # DHCP is bound to the SERVICE ADDRESS, not the wildcard — a correctness fix, not tidiness.
+    #
+    # A wildcard `67:67/udp` runs a `docker-proxy` bound to 0.0.0.0, and a UDP socket on 0.0.0.0
+    # RECEIVES BROADCASTS. Client DHCPDISCOVERs go to 255.255.255.255 — addrtype BROADCAST — so they
+    # bypass the kernel DNAT rule entirely (`-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER`)
+    # and land on the proxy instead. The proxy is a dumb datagram forwarder: it re-sends the payload
+    # from its OWN socket on the docker bridge, so Kea sees the bridge gateway as src, no giaddr and
+    # no interface context, and NAKs with "failed to select a subnet". The reply has no return path,
+    # so the client never hears anything. The symptom: clients on the host's own VLAN can never
+    # lease, while relayed VLANs work fine.
+    #
+    # Binding to a unicast address makes that path IMPOSSIBLE rather than merely broken: a proxy
+    # bound to a unicast address never receives a broadcast. Relayed unicast still arrives through
+    # the kernel DNAT with giaddr intact.
+    #
+    # CAVEAT: the container refuses to start if this address is absent from the host. That is
+    # correct — failing loudly beats silently answering DHCP on the wrong address.
+    ports:
+      - {{ kea_service_ip }}:67:67/udp
+      - {{ (kea_ctrl_agent_bind_address ~ ':') if kea_ctrl_agent_bind_address else '' }}8000:8000
+    entrypoint: ["/init/entrypoint.sh"]
+    command: ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]
+    volumes:
+      - {{ kea_config_dir }}/entrypoint.sh:/init/entrypoint.sh
+      - {{ kea_config_dir }}/kea-dhcp4.conf.template:/etc/kea/kea-dhcp4.conf.template:ro
+      - {{ kea_service_name }}_dhcp_leases:/var/lib/kea
+      # see the ddns service below — same PID-file-outliving-the-container hazard
+      - type: tmpfs
+        target: /run/kea
+        tmpfs:
+          # MUST be kea-writable: a bare tmpfs mounts root:root 0750 and kea (uid 100) then cannot
+          # write its PID file — "Unable to open PID file ... for write" and the daemon dies. Making
+          # stale PID files impossible must not make ALL PID files impossible.
+          mode: 0o1777
+    depends_on:
+      - kea_dhcp_ddns
+
+  kea_dhcp_ddns:
+    image: docker.cloudsmith.io/isc/docker/kea-dhcp-ddns:{{ kea_dhcp_ddns_image_version | default(kea_dhcp_ddns_image_version__default) }}
+    restart: unless-stopped
+    volumes:
+      - {{ kea_config_dir }}/kea-dhcp-ddns.conf:/etc/kea/kea-dhcp-ddns.conf
+      - {{ kea_service_name }}_ddns:/var/lib/kea
+      # tmpfs over /run/kea so PID files CANNOT outlive the container.
+      #
+      # Kea refuses to start if its PID file names a live process. /run/kea lives in the image layer,
+      # so a PID file survives every restart — and once the recorded PID is reused by another
+      # process inside the same container (kea-ctrl-agent, say), kea-dhcp-ddns concludes a second
+      # copy of itself is already running and refuses to start. Permanently: it cannot self-heal,
+      # because it is seeing a genuinely LIVE process, not a stale one.
+      #
+      # A tmpfs is empty on every container start, which is the correct lifetime for a runtime PID
+      # file and makes the whole failure mode impossible rather than merely unlikely.
+      - type: tmpfs
+        target: /run/kea
+        tmpfs:
+          mode: 0o1777
+
+volumes:
+  {{ kea_service_name }}_dhcp_leases:
+  {{ kea_service_name }}_ddns:

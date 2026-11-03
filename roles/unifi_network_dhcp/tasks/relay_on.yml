@@ -1,0 +1,46 @@
+---
+# ENTRYPOINT: put networks into DHCP RELAY mode.
+#
+#   - ansible.builtin.include_role:
+#       name: unifi_network_dhcp
+#       tasks_from: relay_on
+#     vars:
+#       unifi_network_dhcp_networks:
+#         - { vlan: 200 }
+#
+# THE CONSTRAINT THIS ENTRYPOINT EXISTS TO ENFORCE. `dhcp_relay_enabled: true` is only accepted by
+# the controller when it is the ONLY thing changing in the object. Sent alongside anything else —
+# including `dhcp_relay_servers`, which looks like it belongs — the controller returns rc:ok,
+# applies the other fields, and SILENTLY DROPS the flag, leaving a network with no DHCP server at
+# all. There is no error; only a read-back reveals it.
+#
+# Callers therefore do NOT pass the flag: this entrypoint sets it. A caller cannot express the
+# broken request, because the field that made it expressible is not part of this entrypoint's
+# input. Write the relay servers first with `tasks_from: settings`.
+#
+# The previous design took every field in one call and tried to police the combinations at runtime.
+# That gate allowed `length <= 3`, which permits exactly {vlan, dhcp_relay_enabled,
+# dhcp_relay_servers} — the failing shape — so networks configured through it got no DHCP.
+
+- name: Reject any field that would cause the controller to drop the relay flag
+  # The caller supplies vlan ONLY. Anything else is either a mistake or belongs in `settings`.
+  ansible.builtin.assert:
+    that:
+      - (item.keys() | reject('eq', 'vlan') | list | length) == 0
+    fail_msg: >-
+      relay_on takes `vlan` and nothing else, but vlan {{ item.vlan }} also carries
+      {{ item.keys() | reject('eq', 'vlan') | list }}.
+      The controller drops dhcp_relay_enabled when anything else changes in the same request —
+      including dhcp_relay_servers. Apply those with `tasks_from: settings` FIRST, then call
+      relay_on.
+    quiet: true
+  loop: "{{ unifi_network_dhcp_networks | default([]) }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+
+- name: Set the relay flag, alone
+  ansible.builtin.include_tasks: _apply.yml
+  vars:
+    _unifi_requests: >-
+      {{ unifi_network_dhcp_networks | default([])
+         | map('combine', {'dhcp_relay_enabled': true}) | list }}

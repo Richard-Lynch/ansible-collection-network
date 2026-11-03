@@ -1,0 +1,85 @@
+---
+# THE SAFETY LAYER. These are runtime asserts, NOT argspec constraints — OptionSpec
+# (the argspec model) has no range validation and no custom validators, so none of this
+# is expressible there. Every one of these has a molecule negative test proving it FIRES; a guard
+# that cannot fire is worse than no guard.
+#
+# NOTE: the simple declarable constraints (MTU range, address pattern, non-empty key) now live in
+# meta/argument_specs.py and are rendered into _argspec_guards.yml by the argspec generator. What
+# remains here is the logic too complex to declare: cross-field relationships and structural checks.
+#
+# Each condition is ONE LINE. A condition split across lines inside a YAML block scalar gets folded
+# and stops meaning what it looks like it means — that trap has bitten this repo repeatedly,
+# including twice today.
+
+- name: "GUARD — every peer must declare public_key and allowed_ips"
+  # The argspec CANNOT enforce these: declaring nested `options` makes the generator flatten the
+  # sub-defaults into the parent's default and produce a dict where a list belongs (verified). So
+  # the required-ness of the sub-keys lives here instead.
+  ansible.builtin.assert:
+    that:
+      - "wireguard_peers | rejectattr('public_key', 'defined') | list | length == 0"
+      - "wireguard_peers | rejectattr('allowed_ips', 'defined') | list | length == 0"
+      - "wireguard_peers | selectattr('allowed_ips', 'defined') | map(attribute='allowed_ips') | select('string') | list | length == 0"
+    fail_msg: >-
+      Every peer needs a public_key and an allowed_ips LIST. Got:
+      {{ wireguard_peers | map('dict2items') | map('map', attribute='key') | list }}
+    quiet: true
+  when: wireguard_peers | length > 0
+
+- name: "GUARD — every inbound-allow rule must declare daddr and dport"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_inbound_allow | rejectattr('daddr', 'defined') | list | length == 0"
+      - "wireguard_inbound_allow | rejectattr('dport', 'defined') | list | length == 0"
+    fail_msg: "Every wireguard_inbound_allow entry needs daddr and dport."
+    quiet: true
+  when: wireguard_inbound_allow | length > 0
+
+- name: "GUARD — Table must be off unless deliberately overridden"
+  # With Table unset, wg-quick installs routes for every AllowedIPs entry. Combined with a wide
+  # AllowedIPs that replaces the default route on a remote host.
+  ansible.builtin.assert:
+    that:
+      - "wireguard_table in ['none', 'off']"
+    fail_msg: >-
+      wireguard_table is '{{ wireguard_table }}', not 'none'. wg-quick would then install routes
+      from AllowedIPs, which on a remote public host can replace the default route and strand you
+      with no path back except the provider console. Override only with a documented reason.
+    quiet: true
+
+- name: "GUARD — no peer may claim a default route"
+  # THE stranding failure. 0.0.0.0/0 is the most-copied line in WireGuard examples because it is
+  # correct for a road-warrior VPN client and catastrophic for a site link.
+  ansible.builtin.assert:
+    that:
+      - "wireguard_peers | map(attribute='allowed_ips') | flatten | select('in', ['0.0.0.0/0', '::/0']) | list | length == 0"
+    fail_msg: >-
+      A peer declares allowed_ips containing 0.0.0.0/0 or ::/0. That is a full-tunnel VPN client
+      config, not a site link: it captures the host's entire routing and, on a remote host, would
+      take down SSH and every public service in one packet. Declare
+      only the specific remote subnets.
+    quiet: true
+
+- name: "GUARD — keepalive must be in range"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_peers | map(attribute='persistent_keepalive') | map('default', 0) | map('int') | select('>', 120) | list | length == 0"
+    fail_msg: "persistent_keepalive must be 0-120 seconds. 25 is the documented value for a NAT'd initiator."
+    quiet: true
+
+- name: "GUARD — a peer's allowed_ips must not contain its own endpoint"
+  # Subtle and fatal: routing the endpoint address INTO the tunnel means the encrypted packets
+  # carrying the tunnel are themselves routed into the tunnel. The link comes up and immediately
+  # deadlocks.
+  vars:
+    _endpoint_hosts: "{{ wireguard_peers | selectattr('endpoint', 'defined') | map(attribute='endpoint') | select('search', ':') | map('split', ':') | map('first')
+      | list }}"
+  ansible.builtin.assert:
+    that:
+      - "wireguard_peers | map(attribute='allowed_ips') | flatten | map('ansible.utils.ipaddr', 'net') | select('in', _endpoint_hosts) | list | length == 0"
+    fail_msg: >-
+      A peer's allowed_ips contains its own endpoint address ({{ _endpoint_hosts }}). The tunnel's
+      own carrier packets would be routed into the tunnel, deadlocking it the moment it comes up.
+    quiet: true
+  when: _endpoint_hosts | length > 0

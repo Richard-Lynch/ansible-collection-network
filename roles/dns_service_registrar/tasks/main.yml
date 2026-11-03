@@ -1,0 +1,87 @@
+---
+# Reconcile one svc.* zone against the set of services a host actually runs.
+#
+# WHAT THIS IS. In a two-layer name model, machine-written names have two registrars: DHCP DDNS
+# registers HOSTS into <segment>.example.com, and this role registers SERVICES into
+# svc.<segment>.example.com. Neither should be able to write the other's zone (separate TSIG keys,
+# restricted by allow-update). Humans write neither — Layer 2 is CNAMEs in a zone kept in git.
+#
+# Records are CNAMEs to the host's DDNS-registered name, never A records: when the host renumbers,
+# every service follows automatically at Kea's speed with this role doing nothing. An A record would
+# make this a second address authority whose failure mode is a stale IP that still resolves.
+#
+# INVOKED FROM THE APPLY PATH OF A STACK DEPLOY, so registration is a side effect of deploying
+# rather than a step someone can forget — which works when the service set only changes when a
+# play runs.
+#
+# GENERATE-DON'T-APPLY: reports the diff and stops unless svc_dns_apply=true.
+
+- name: Resolve the role's generated defaults
+  ansible.builtin.include_tasks: setup_vars.yml
+
+- name: Normalise the desired name list
+  # Accepts a real list (how a deploy play passes it) OR a comma-separated string (how an extra var
+  # `-e svc_dns_names=a,b` delivers it — the key=val form cannot express a list).
+  #
+  # Written to a SEPARATE fact rather than back onto svc_dns_names: an extra-var always outranks a
+  # set_fact, so re-assigning the same name is silently ignored and the string survives untouched.
+  ansible.builtin.set_fact:
+    _svc_want: >-
+      {{ svc_dns_names if (svc_dns_names | type_debug) == 'list'
+         else (svc_dns_names | default('') | split(',') | map('trim') | select | list) }}
+
+- name: Validate inputs
+  ansible.builtin.assert:
+    that:
+      - svc_dns_zone is defined and (svc_dns_zone | length) > 0
+      - svc_dns_target is defined and (svc_dns_target | length) > 0
+      - (_svc_want | type_debug) == 'list'
+    fail_msg: >-
+      Required: svc_dns_zone, svc_dns_target (the host's DDNS FQDN), and svc_dns_names —
+      a list, or a comma-separated string when passed via EXTRA=.
+      Got: zone=[{{ svc_dns_zone | default('UNDEFINED') }}]
+      target=[{{ svc_dns_target | default('UNDEFINED') }}]
+      names=[{{ _svc_want | default('UNDEFINED') }}] ({{ _svc_want | default('') | type_debug }})
+    quiet: true
+
+- name: Set internal facts
+  ansible.builtin.set_fact:
+    # A REAL newline. '\n' inside a YAML folded scalar is the two characters backslash+n.
+    _svc_nl: "\n"
+    _svc_keyfile: "/tmp/.svcreg_{{ svc_dns_zone }}_{{ ansible_date_time.epoch | default(999) }}.key"
+
+- name: Read the zone's current state
+  ansible.builtin.include_tasks: read_zone.yml
+
+- name: Compute the reconcile
+  ansible.builtin.include_tasks: compute.yml
+
+- name: Report the plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'APPLY' if (svc_dns_apply | default(false) | bool) else 'PREVIEW (set svc_dns_apply=true)' }}
+      {{ svc_dns_zone }}: +{{ svc_dns_adds }} -{{ svc_dns_deletes }}
+      (target {{ svc_dns_target }})
+
+- name: Apply and verify
+  when:
+    - svc_dns_apply | default(false) | bool
+    - (svc_dns_adds | length) + (svc_dns_deletes | length) > 0
+  block:
+    - name: Apply the transaction
+      ansible.builtin.include_tasks: apply.yml
+
+    - name: Verify against the running server
+      ansible.builtin.include_tasks: verify.yml
+  always:
+    - name: Remove the TSIG keyfile (always, even on failure)
+      ansible.builtin.file:
+        path: "{{ _svc_keyfile }}"
+        state: absent
+      changed_when: false
+
+- name: Remove the TSIG keyfile when nothing was applied
+  ansible.builtin.file:
+    path: "{{ _svc_keyfile }}"
+    state: absent
+  changed_when: false

@@ -1,0 +1,10 @@
+---
+# Shared by prepare, converge (records play), verify and cleanup.
+rec_dir: /tmp/molecule-bind9-records
+rec_port: 15353
+# The role's own pinned image (defaults/main.yml bind9_image), so the test runs the real server.
+rec_image: "ubuntu/bind9@sha256:d3cdf209e7664b1d27ac4090a465740dbb848ecf931e8af0576c4764356a1531"
+ddns_tsig_key_name: dhcp-key
+ddns_tsig_key_algorithm: hmac-sha256
+# base64("molecule-test-key-not-a-secret00"): bind9 needs valid base64; a synthetic test value.
+ddns_tsig_key_secret: "bW9sZWN1bGUtdGVzdC1rZXktbm90LWEtc2VjcmV0MDA="  # gitleaks:allow - synthetic molecule test key

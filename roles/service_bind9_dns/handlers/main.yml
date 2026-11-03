@@ -1,0 +1,5 @@
+---
+- name: Restart bind9
+  community.docker.docker_compose_v2:
+    project_src: "{{ bind9_config_dir }}"
+    state: restarted

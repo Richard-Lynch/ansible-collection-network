@@ -1,0 +1,156 @@
+---
+# AUTO-GENERATED argument spec — DO NOT EDIT.
+#
+# Source of truth: roles/kea_reservations/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate kea_reservations
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+argument_specs:
+  main:
+    short_description: Merge and validate per-host Kea DHCP reservations
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      kea_reservations_dir:
+        description:
+          - Directory holding one YAML file per reserved host.
+          - ''
+          - "No default: where the declarations live is the caller's decision. If it is given"
+          - relative to `playbook_dir`, note that is the directory of the play being RUN, not of
+          - this role, so plays in different directories need an absolute or project-relative path.
+        type: str
+        required: true
+      kea_reservations_require_why:
+        description:
+          - Require every declaration to explain why its address must not move.
+          - ''
+          - 'ON by default, and the reason is not bureaucratic: the rationale is the'
+          - most valuable part of a reservation and the part that cannot be
+          - reconstructed later. That an address is hardcoded in a dozen agents'
+          - configs, is the storage portal a stack mounts through, or sits behind
+          - router port forwards is not visible in the address, so the next person
+          - either keeps a reservation nobody can justify or moves one that silently
+          - breaks things.
+        type: bool
+        required: false
+        default: true
+      kea_reservations_extra:
+        description:
+          - Reservations merged IN ADDITION to the directory, validated identically.
+          - ''
+          - 'Useful when migrating from a single inventory list: the old list can be'
+          - merged alongside the per-host files so both can be proven equivalent
+          - before the old one is deleted. Normally empty.
+        type: list
+        required: false
+        default: []
+        elements: dict
+  assert_reserved:
+    short_description: Gate provisioning on a reservation being declared AND live
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      kea_reservations_dir:
+        description:
+          - Directory holding one YAML file per reserved host.
+          - ''
+          - "No default: where the declarations live is the caller's decision. If it is given"
+          - relative to `playbook_dir`, note that is the directory of the play being RUN, not of
+          - this role, so plays in different directories need an absolute or project-relative path.
+        type: str
+        required: true
+      reservation_host:
+        description:
+          - The hostname whose reservation must exist. Matches the declaration's
+          - FILENAME (`<host>.yml`), which is also its `hostname` field.
+        type: str
+        required: true
+      reservation_expected:
+        description:
+          - Set false to DECLARE that this host deliberately has no reservation.
+          - ''
+          - Needed for genuine bootstrap cases — the host that runs Kea cannot gate on
+          - the Kea it is about to run — and for consumer devices that lease normally.
+          - 'A declared exception, not a silently-skipped check: pair it with a comment'
+          - saying why, the same shape as kea_inpool_reservations_allowed.
+        type: bool
+        required: false
+        default: true
+      reservation_check_live:
+        description:
+          - Also verify the reservation is LIVE in the running Kea, not merely
+          - declared on disk.
+          - ''
+          - This is the half that makes the gate mean anything. A file in the repo
+          - proves someone wrote it; it says nothing about whether Kea would honour it
+          - — and the two diverge routinely, because service_kea_dhcp restarts only
+          - '`when: deployment_config_changed`, so a re-render after a failed run'
+          - leaves the process serving stale config from memory while every file on
+          - disk looks right.
+          - ''
+          - Set false only where the live check cannot work (no path to the Kea host).
+        type: bool
+        required: false
+        default: true
+      reservation_kea_host:
+        description:
+          - Inventory host running Kea; the live check is delegated to it.
+        type: str
+        required: true
+      reservation_kea_container:
+        description:
+          - Kea container name on that host.
+        type: str
+        required: false
+        default: kea_dhcp
+  declare:
+    short_description: Write one validated reservation declaration
+    version_added: '1.0'
+    author: Collection maintainers
+    options:
+      kea_reservations_dir:
+        description:
+          - Directory holding one YAML file per reserved host.
+          - ''
+          - "No default: where the declarations live is the caller's decision. If it is given"
+          - relative to `playbook_dir`, note that is the directory of the play being RUN, not of
+          - this role, so plays in different directories need an absolute or project-relative path.
+        type: str
+        required: true
+      reservation_host:
+        description:
+          - Short hostname. Becomes the filename AND the `hostname` field, which Kea
+          - qualifies with the subnet's ddns suffix — so never pass an FQDN.
+        type: str
+        required: true
+      reservation_subnet:
+        description:
+          - VLAN id. Must exist in kea_vlans.
+        type: int
+        required: true
+      reservation_mac:
+        description:
+          - MAC address, colon-separated.
+        type: str
+        required: true
+      reservation_ip:
+        description:
+          - Address to pin. Must be in the subnet's reserved band.
+        type: str
+        required: true
+      reservation_why:
+        description:
+          - What breaks if this address moves. Required, and min-length'd so it
+          - cannot be satisfied with 'n/a'.
+        type: str
+        required: true
+      reservation_declare_apply:
+        description:
+          - "Generate-don't-apply: report the file that WOULD be written and change"
+          - nothing unless true. Matches the house convention for anything that
+          - writes.
+        type: bool
+        required: false
+        default: false

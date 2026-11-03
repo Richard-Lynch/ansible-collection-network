@@ -1,0 +1,61 @@
+---
+# A record declared in a DYNAMIC zone (_record_zone_kind.yml: named.conf lets a key update it, i.e.
+# Kea-served) that is NOT the infrastructure exception: this role does NOT write it (the exception,
+# infra: true, goes to _dynamic_record.yml instead, over RFC 2136).
+#
+# Why. bind9 owns a journaled zone's file and rewrites it from memory, dropping the
+# `; BEGIN/END ANSIBLE MANAGED` markers, so a blockinfile path re-inserts the same block and
+# restarts bind9 on EVERY run, leaving duplicate lines. And by design no human-authored record
+# belongs in a dynamic zone at all, bar the infrastructure exception (those few names are reconciled
+# over RFC 2136). Everything else here is Kea's.
+#
+# Not writing must not mean not knowing: a PRESENT record is checked read-only against what bind9
+# SERVES, and a name that does not resolve to its declared value FAILS the run.
+#
+# Inputs (from add_host_to_domain / add_cname_to_domain): _ds_type (A|CNAME), _ds_fqdn, _ds_value
+# (an address, or a target FQDN WITH its trailing dot, as dig prints it).
+
+- name: "Dynamic zone — {{ _ds_fqdn }}: declared in a Kea zone; not managed here (dynamic zones belong to DDNS)"
+  ansible.builtin.debug:
+    msg: >-
+      {{ bind9_state | default('present') }} {{ _ds_type }} {{ _ds_fqdn }}: declared in a Kea zone;
+      not managed here (dynamic zones belong to DDNS).
+      {{ 'Checked read-only below: it must still resolve to ' ~ _ds_value ~ '.'
+         if (bind9_state | default('present')) == 'present'
+         else 'Not removed: retire a name in a dynamic zone with an RFC 2136 delete (nsupdate).' }}
+
+- name: "Dynamic zone — does {{ _ds_fqdn }} still resolve to its declared value (read-only)"
+  when: (bind9_state | default('present')) == 'present'
+  block:
+    - name: "Dynamic zone — what bind9 serves for {{ _ds_fqdn }} {{ _ds_type }}"
+      ansible.builtin.command:
+        argv:
+          - dig
+          - -p
+          - "{{ bind9_dns_service_port | default(53) }}"
+          - "@{{ bind9_dns_service_bind_ip | default(bind9_server_address, true) }}"
+          - "{{ _ds_fqdn }}"
+          - "{{ _ds_type }}"
+          - +short
+          - +time=3
+          - +tries=2
+      register: _ds_served
+      changed_when: false
+      failed_when: false
+
+    - name: "Dynamic zone — HARD GATE: {{ _ds_fqdn }} resolves to {{ _ds_value }}"
+      # Three outcomes, never two: an unreadable answer (rc, or dig's own `;;` diagnostics on stdout)
+      # is CANNOT TELL and fails with that word, so a broken read never passes as "it resolves".
+      ansible.builtin.assert:
+        that:
+          - _ds_served.rc == 0
+          - _ds_served.stdout_lines | select('match', ';;') | list | length == 0
+          - _ds_value in (_ds_served.stdout_lines | map('trim') | list)
+        fail_msg: >-
+          {{ ('CANNOT TELL whether ' ~ _ds_fqdn ~ ' resolves (dig rc=' ~ _ds_served.rc ~ '): '
+              ~ (_ds_served.stdout | default('') | truncate(160)))
+             if (_ds_served.rc != 0 or (_ds_served.stdout_lines | select('match', ';;') | list | length) > 0)
+             else (_ds_fqdn ~ ' ' ~ _ds_type ~ ' does NOT resolve to its declared ' ~ _ds_value
+                   ~ ' (served: ' ~ (_ds_served.stdout_lines | join(', ') or 'nothing') ~ '). It sits in a Kea zone this'
+                   ~ ' role does not write; restore it deliberately with an RFC 2136 update (nsupdate).') }}
+        success_msg: "{{ _ds_fqdn }} resolves to {{ _ds_value }} (served, not written)"

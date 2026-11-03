@@ -1,0 +1,68 @@
+{
+  "DhcpDdns": {
+    "ip-address": "0.0.0.0",
+    "port": 53001,
+    "ncr-protocol": "UDP",
+    "ncr-format": "JSON",
+
+    "tsig-keys": [
+      {
+        "name": "{{ ddns_tsig_key_name }}",
+        "algorithm": "{{ ddns_tsig_key_algorithm }}",
+        "secret": "{{ ddns_tsig_key_secret }}"
+      }
+    ],
+
+    "forward-ddns": {
+      "ddns-domains": [
+{% for vlan in kea_vlans %}
+        {
+          "name": "{{ vlan.name }}.{{ vlan.domain_name }}.",
+          "key-name": "{{ ddns_tsig_key_name }}",
+          "dns-servers": [
+{% for dns_server in kea_dns_servers %}
+            {
+              "ip-address": "{{ dns_server.ip }}",
+              "port": {{ dns_server.port }}
+            }{% if not loop.last %},{% endif %}
+{% endfor %}
+          ]
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ]
+    },
+
+    "reverse-ddns": {
+      "ddns-domains": [
+{% for vlan in kea_vlans %}
+        {
+          "name": "{{ vlan.base.split('.')[:3] | reverse | join('.') }}.in-addr.arpa.",
+          "key-name": "{{ ddns_tsig_key_name }}",
+          "dns-servers": [
+{% for dns_server in kea_dns_servers %}
+            {
+              "ip-address": "{{ dns_server.ip }}",
+              "port": {{ dns_server.port }}
+            }{% if not loop.last %},{% endif %}
+{% endfor %}
+          ]
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ]
+    },
+
+  "loggers": [
+    {
+      "name": "kea-dhcp-ddns",
+      "output_options": [
+        {
+          "output": "stdout"
+        }
+      ],
+      "severity": "DEBUG",
+      "debuglevel": 99
+    }
+  ]
+
+  }
+}

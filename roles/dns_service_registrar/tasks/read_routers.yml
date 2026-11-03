@@ -1,0 +1,49 @@
+---
+# Read a traefik instance's LIVE router set and extract the svc.* hostnames it serves.
+#
+# THIS FILE IS A SWAP SEAM. As written it feeds an AUDIT only: DNS is derived from git (service
+# definitions) and this read checks reality against that. A design that makes traefik's live router
+# set the SOURCE OF TRUTH would feed this same read into compute.yml's desired-set instead, and a
+# traefik-vs-git disagreement would stop being a bug the audit reports and become normal.
+#
+# Promoting this from auditor to driver is most of that swap. Keeping the read in its own task file
+# with a data-shaped output is what makes that a small change rather than a rewrite.
+
+- name: Read routers — query the traefik API
+  # A host-header request straight at the instance's address, so the read stays on the local
+  # network. It sends no credentials: point svc_routers_api_ip/svc_routers_api_host at an API
+  # endpoint the probing host is permitted to read.
+  ansible.builtin.uri:
+    url: "https://{{ svc_routers_api_ip }}/api/http/routers"
+    headers:
+      Host: "{{ svc_routers_api_host }}"
+    validate_certs: false
+    return_content: true
+    timeout: 10
+  register: _svc_routers_raw
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ svc_routers_probe_from | default(inventory_hostname) }}"
+
+- name: HARD GATE — the router API must have answered
+  # An unreachable API returning empty would read as "traefik serves nothing", making every DNS
+  # record look like an orphan and the audit fail for the wrong reason.
+  ansible.builtin.assert:
+    that:
+      - (_svc_routers_raw.status | default(0)) == 200
+      - (_svc_routers_raw.json | default([]) | length) > 0
+    fail_msg: >-
+      Could not read the traefik router API at {{ svc_routers_api_host }}
+      ({{ svc_routers_api_ip }}): status={{ _svc_routers_raw.status | default('none') }}.
+      Refusing to audit against an unread router set — everything would look orphaned.
+    success_msg: "Router API read."
+    quiet: true
+
+- name: Read routers — extract the svc.* hostnames traefik actually serves
+  ansible.builtin.set_fact:
+    svc_routers_names: >-
+      {{ _svc_routers_raw.json
+         | map(attribute='rule') | select('defined') | list
+         | map('regex_findall', 'Host\(`([^`]+)`\)') | flatten
+         | select('search', '\.' ~ (svc_dns_zone | regex_escape) ~ '$')
+         | map('regex_replace', '^([^.]+)\..*$', '\1') | unique | sort | list }}

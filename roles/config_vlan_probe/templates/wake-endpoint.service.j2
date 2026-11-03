@@ -1,0 +1,40 @@
+[Unit]
+# MANAGED BY ANSIBLE — roles/config_vlan_probe/templates/wake-endpoint.service.j2
+Description=Wake-on-LAN HTTP endpoint (multi-homed sender)
+Documentation=file://{{ config_vlan_probe_wake_script }}
+# network-online rather than network.target: the service binds 0.0.0.0 so it would start either
+# way, but the legs it exists to send FROM are DHCP-leased per VLAN, and starting before they
+# are up means the first request after a boot can pick the wrong source interface.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# The allowlist is passed as JSON on the command line, so it comes from inventory and this unit
+# carries no installation configuration of its own. Single-quoted: the JSON contains double quotes.
+ExecStart=/usr/bin/python3 {{ config_vlan_probe_wake_script }} {{ config_vlan_probe_wake_port }} '{{ config_vlan_probe_wake_targets | to_json }}'
+Restart=always
+RestartSec=3
+
+# Hardening that also works inside an unprivileged container. The service needs exactly one
+# capability — a broadcast UDP socket — and nothing else. Note it needs neither CAP_NET_RAW nor
+# root: a magic packet is an ordinary unprivileged datagram.
+#
+# MOUNT-NAMESPACE DIRECTIVES (PrivateTmp, PrivateDevices, ProtectSystem, ProtectHome,
+# ProtectKernel*, RestrictNamespaces) ARE DELIBERATELY ABSENT. An unprivileged container usually
+# cannot create the mount namespace they require, and the unit then fails to start at all with
+# status=226/NAMESPACE — so there they are not extra safety, they are a unit that never runs, and
+# the container boundary already provides that isolation. Add them back on a full VM or host.
+#
+# What IS kept works without a namespace and is worth having:
+DynamicUser=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/unifi_network/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate unifi_network
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+unifi_network_apply__default: false
+unifi_network_site__default: default
+unifi_network_validate_certs__default: false

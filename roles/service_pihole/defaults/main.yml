@@ -1,0 +1,93 @@
+---
+# service_pihole — forwarding ad-block DNS. Pi-hole either sits behind another resolver (which
+# forwards to it on a non-53 port) or in front as the client-facing resolver; it forwards everything
+# it does not answer itself to public upstreams.
+
+pihole_service_name: pihole
+pihole_config_dir: /opt/pi-hole
+# The container's hostname. Docker sets the kernel hostname to this FULL string, so FTL answers it
+# as its own name (see pihole_reply_host_ip).
+pihole_hostname: "pihole"
+
+# Pin the image (never :latest). pihole v6 uses FTLCONF_* env for config.
+pihole_image: "pihole/pihole:2026.07.2"
+
+# Published ports (host:container). Behind another resolver, DNS goes on a non-53 port (e.g. 5053)
+# that the resolver forwards to; web UI on :5080/:5443.
+# FRONT DOOR. Pi-hole as the client-facing resolver on :53, with the authoritative server behind it
+# on a different address, is the ONLY arrangement in which Pi-hole sees real
+# client IPs — behind bind9 every query arrives as the docker bridge address. The caller states the
+# addresses (pihole_dns_bind_ip, pihole_reply_host_ip); the port defaults to 53 for that shape.
+pihole_dns_port: 53
+pihole_web_http_port: 5080
+pihole_web_https_port: 5443
+
+pihole_timezone: "UTC"
+
+# Public upstreams pihole forwards to.
+pihole_upstreams:
+  - "8.8.8.8"
+  - "8.8.4.4"
+
+# Listen on all interfaces (a resolver in front queries it over the docker/host network).
+pihole_listening_mode: "all"
+
+# Ad-block lists (gravity is rebuilt from these on deploy).
+pihole_adlists:
+  - "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+
+# Web/API password. Supply it from your secrets manager; never default a real secret here.
+pihole_web_password: "CHANGE_ME_VIA_1PASSWORD"
+
+# --- front door ---
+# Empty = bind all addresses. Set to the service address with pihole_dns_port=53 to make pihole the
+# client-facing resolver without grabbing every other address on the host.
+pihole_dns_bind_ip: ""
+
+# Fixed IPv4 FTL uses for its OWN "local interface" replies (pi.hole + the container's own
+# hostname — which docker sets to the FULL pihole_hostname string). Empty = FTL's default
+# auto-detected-interface behaviour. Set it to the service address once pihole is the front door, or
+# FTL answers those names from the docker bridge address (a 172.x address, TTL 0) instead of the
+# service address every other local name resolves to — the UI then looks unreachable while DNS
+# works. See templates/docker-compose.yml.j2 for the exact FTLCONF keys this maps to.
+pihole_reply_host_ip: ""
+
+# --- domain rules (allow/deny), reconciled via the Pi-hole v6 REST API ---
+# Repo list is the source of truth. ADD YOUR ALLOWLIST HERE — see README.md "Domain rules" for the
+# exact spot and format. Never invented/seeded by this role; starts empty.
+pihole_allow_domains: []
+pihole_deny_domains: []
+# Regex allow/deny rules — same reconciliation as pihole_allow_domains/pihole_deny_domains, but for
+# Pi-hole's regex-kind rules (kind=regex, not exact). Separate lists (not inferred from the pattern)
+# so an exact domain that happens to look like a regex is never silently reinterpreted.
+pihole_allow_regex: []
+pihole_deny_regex: []
+# Reserved for future group/client management (see README — cheap to add, not wired up yet).
+pihole_groups: []
+pihole_clients: []
+# Generate-don't-apply for pihole_allow_domains/pihole_deny_domains reconciliation.
+pihole_domains_apply: false
+
+# Address the manage_domains task file calls the REST API on. Defaults to loopback for when it runs
+# on the pihole host itself; override when calling it from a different host in the play.
+pihole_api_host: "127.0.0.1"
+
+# Comment stamped on every domain rule this role creates, and the ONLY marker manage_domains uses to
+# decide a live rule is safe to remove. Rules a human added by hand in the web UI (any other comment,
+# or none) are never touched — this role reconciles its own entries, not the whole domains table.
+# Covers both exact and regex rules (pihole_allow_domains/pihole_deny_domains/pihole_allow_regex/
+# pihole_deny_regex) — one marker for all four repo lists, since they share one reconciliation pass.
+pihole_domains_managed_comment: "managed by service_pihole"
+
+# --- conditional forwarding (front-door architecture) --------------------------------------------
+# When Pi-hole is the client-facing resolver, IT must send the local zones to the authoritative
+# server — otherwise internal names simply do not resolve while everything external still works,
+# which reads like a partial outage rather than a config gap. Empty by default: the caller lists
+# its own zones and subnets (see templates/docker-compose.yml.j2 for the exact formats).
+#
+# Raw dnsmasq lines, e.g. "server=/example.com/192.0.2.3" for a domain not tied to one CIDR.
+pihole_dnsmasq_lines: []
+
+# Reverse-lookup forwarding, one '<enabled>,<cidr>,<server>' entry per subnet, so client
+# attribution shows NAMES and not bare IPs, e.g. "true,192.0.2.0/24,192.0.2.3".
+pihole_rev_servers: []

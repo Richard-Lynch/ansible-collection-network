@@ -1,0 +1,73 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/service_wireguard_peer/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_wireguard_peer
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    wireguard_interface: "{{ wireguard_interface | default(wireguard_interface__default) if wireguard_interface__default is defined else wireguard_interface | default(omit) }}"
+    wireguard_listen_port: "{{ wireguard_listen_port | default(wireguard_listen_port__default) if wireguard_listen_port__default is defined else wireguard_listen_port | default(omit) }}"
+    wireguard_private_key_path: "{{ wireguard_private_key_path | default(wireguard_private_key_path__default) if wireguard_private_key_path__default is defined else wireguard_private_key_path | default(omit) }}"
+    wireguard_private_key: "{{ wireguard_private_key | default(wireguard_private_key__default) if wireguard_private_key__default is defined else wireguard_private_key | default(omit) }}"
+    wireguard_public_key: "{{ wireguard_public_key | default(wireguard_public_key__default) if wireguard_public_key__default is defined else wireguard_public_key | default(omit) }}"
+    wireguard_peers: "{{ wireguard_peers | default(wireguard_peers__default) if wireguard_peers__default is defined else wireguard_peers | default(omit) }}"
+    wireguard_mtu: "{{ wireguard_mtu | default(wireguard_mtu__default) if wireguard_mtu__default is defined else wireguard_mtu | default(omit) }}"
+    wireguard_table: "{{ wireguard_table | default(wireguard_table__default) if wireguard_table__default is defined else wireguard_table | default(omit) }}"
+    wireguard_forward: "{{ wireguard_forward | default(wireguard_forward__default) if wireguard_forward__default is defined else wireguard_forward | default(omit) }}"
+    wireguard_manage_nftables: "{{ wireguard_manage_nftables | default(wireguard_manage_nftables__default) if wireguard_manage_nftables__default is defined else wireguard_manage_nftables | default(omit) }}"
+    wireguard_inbound_allow: "{{ wireguard_inbound_allow | default(wireguard_inbound_allow__default) if wireguard_inbound_allow__default is defined else wireguard_inbound_allow | default(omit) }}"
+    wireguard_apply: "{{ wireguard_apply | default(wireguard_apply__default) if wireguard_apply__default is defined else wireguard_apply | default(omit) }}"
+    wireguard_render_dir: "{{ wireguard_render_dir | default(wireguard_render_dir__default) if wireguard_render_dir__default is defined else wireguard_render_dir | default(omit) }}"
+    wireguard_verify_transport: "{{ wireguard_verify_transport | default(wireguard_verify_transport__default) if wireguard_verify_transport__default is defined else wireguard_verify_transport | default(omit) }}"
+    wireguard_teardown_confirm: "{{ wireguard_teardown_confirm | default(wireguard_teardown_confirm__default) if wireguard_teardown_confirm__default is defined else wireguard_teardown_confirm | default(omit) }}"
+  when: not (_service_wireguard_peer__argspec_resolved | default(false))
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    wireguard_interface: "{{ wireguard_interface__default if wireguard_interface__default is defined else wireguard_interface | default(omit) }}"
+    wireguard_listen_port: "{{ wireguard_listen_port__default if wireguard_listen_port__default is defined else wireguard_listen_port | default(omit) }}"
+    wireguard_private_key_path: "{{ wireguard_private_key_path__default if wireguard_private_key_path__default is defined else wireguard_private_key_path | default(omit) }}"
+    wireguard_private_key: "{{ wireguard_private_key__default if wireguard_private_key__default is defined else wireguard_private_key | default(omit) }}"
+    wireguard_public_key: "{{ wireguard_public_key__default if wireguard_public_key__default is defined else wireguard_public_key | default(omit) }}"
+    wireguard_peers: "{{ wireguard_peers__default if wireguard_peers__default is defined else wireguard_peers | default(omit) }}"
+    wireguard_mtu: "{{ wireguard_mtu__default if wireguard_mtu__default is defined else wireguard_mtu | default(omit) }}"
+    wireguard_table: "{{ wireguard_table__default if wireguard_table__default is defined else wireguard_table | default(omit) }}"
+    wireguard_forward: "{{ wireguard_forward__default if wireguard_forward__default is defined else wireguard_forward | default(omit) }}"
+    wireguard_manage_nftables: "{{ wireguard_manage_nftables__default if wireguard_manage_nftables__default is defined else wireguard_manage_nftables | default(omit) }}"
+    wireguard_inbound_allow: "{{ wireguard_inbound_allow__default if wireguard_inbound_allow__default is defined else wireguard_inbound_allow | default(omit) }}"
+    wireguard_apply: "{{ wireguard_apply__default if wireguard_apply__default is defined else wireguard_apply | default(omit) }}"
+    wireguard_render_dir: "{{ wireguard_render_dir__default if wireguard_render_dir__default is defined else wireguard_render_dir | default(omit) }}"
+    wireguard_verify_transport: "{{ wireguard_verify_transport__default if wireguard_verify_transport__default is defined else wireguard_verify_transport | default(omit) }}"
+    wireguard_teardown_confirm: "{{ wireguard_teardown_confirm__default if wireguard_teardown_confirm__default is defined else wireguard_teardown_confirm | default(omit) }}"
+  when: _service_wireguard_peer__argspec_resolved | default(false)
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _service_wireguard_peer__argspec_resolved: true

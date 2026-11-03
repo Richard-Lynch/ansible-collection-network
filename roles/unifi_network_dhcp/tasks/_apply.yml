@@ -1,0 +1,199 @@
+---
+# SHARED ENGINE — never called directly. Each entrypoint (relay_on.yml / relay_off.yml /
+# settings.yml) validates its OWN shape, then includes this to do the work.
+#
+# Everything below is shape-agnostic: fetch the live objects, merge only the requested keys,
+# PUT, and read back. The UniFi API replaces the WHOLE object on PUT, so the live object is
+# always fetched first and merged into — never constructed from scratch.
+
+- name: Assert the API key was supplied (never ship the placeholder)
+  ansible.builtin.assert:
+    that:
+      - (unifi_network_dhcp_api_key | default(unifi_network_dhcp_api_key__default)) != "CHANGE_ME_VIA_1PASSWORD"
+      - (unifi_network_dhcp_api_key | default(unifi_network_dhcp_api_key__default)) | length > 0
+    fail_msg: >-
+      unifi_network_dhcp_api_key must be supplied (from a secrets manager). NOTE: a lookup that
+      silently returns an empty string makes every request 401 in a way that looks like a scope
+      problem — check the lookup itself first.
+    quiet: true
+
+# TESTABILITY: `unifi_network_dhcp_live_fixture` lets molecule inject a captured networkconf
+# payload instead of calling the controller, so the REAL role runs — entrypoint validation,
+# dispatch, merge, diff — with only the two HTTP calls stubbed. Without this the scenario could
+# only re-implement the role's expressions and assert the copy against itself, which is how a
+# completely absent `dhcp_relay_enabled` stayed green through a full molecule run.
+# Unset in normal operation; the controller is fetched as usual.
+- name: Use an injected fixture instead of the controller (test only)
+  ansible.builtin.set_fact:
+    _unifi_live_stub: "{{ {'json': unifi_network_dhcp_live_fixture} }}"
+  when: unifi_network_dhcp_live_fixture is defined
+
+- name: Fetch the live network configuration
+  when: unifi_network_dhcp_live_fixture is not defined
+  ansible.builtin.uri:
+    url: "https://{{ unifi_network_dhcp_host | default(unifi_network_dhcp_host__default) }}/proxy/network/api/s/{{ unifi_network_dhcp_site | default(unifi_network_dhcp_site__default)
+      }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_network_dhcp_api_key | default(unifi_network_dhcp_api_key__default) }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_network_dhcp_validate_certs | default(unifi_network_dhcp_validate_certs__default) }}"
+    return_content: true
+  register: _unifi_live_http
+  changed_when: false
+
+- name: Resolve which source the live data came from
+  # `register:` fires even when a task is SKIPPED, writing a skip result over anything already in
+  # that name — so the fixture and the HTTP response must land in DIFFERENT variables and be
+  # selected here. Registering both as `_unifi_live` silently clobbered the fixture with
+  # {"skipped": true}, which then failed as "dict has no attribute 'json'".
+  ansible.builtin.set_fact:
+    _unifi_live: >-
+      {{ _unifi_live_stub if (unifi_network_dhcp_live_fixture is defined) else _unifi_live_http }}
+
+- name: Index the live networks by VLAN id
+  # Keys are cast to STRING because a caller passing `vlan: "{{ item.id }}"` supplies "110" while
+  # the controller returns the integer 110, and `"110" in {110: ...}` is False. That mismatch does
+  # not error — it silently misses, so every later lookup falls through to "no change requested".
+  # Callers should not have to know whether their vlan id survived templating as a string.
+  ansible.builtin.set_fact:
+    _unifi_by_vlan: >-
+      {{ dict(_unifi_live.json.data | selectattr('vlan', 'defined')
+              | map(attribute='vlan') | map('string') | zip(
+              _unifi_live.json.data | selectattr('vlan', 'defined'))) }}
+
+- name: Assert every requested VLAN exists on the controller
+  ansible.builtin.assert:
+    that:
+      - (item.vlan | string) in _unifi_by_vlan
+    fail_msg: >-
+      VLAN {{ item.vlan }} was not found on the controller (known VLANs:
+      {{ _unifi_by_vlan.keys() | list | sort }}). Refusing to guess.
+    quiet: true
+  loop: "{{ _unifi_requests }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+
+- name: Compute the desired change set
+  # Builds, per requested network, the merged object and a human-readable diff of ONLY what differs.
+  ansible.builtin.set_fact:
+    _unifi_changes: "{{ _unifi_changes | default([]) + [_change] }}"
+  vars:
+    _live: "{{ _unifi_by_vlan[item.vlan | string] }}"
+    # dhcpd_dns is a list here but dhcpd_dns_1..4 on the wire. Shrinking the list must CLEAR the
+    # higher-numbered fields — otherwise dropping a resolver would silently leave the old one live
+    # (e.g. [a,b,c] -> [a,b] would keep handing out `c` from a stale dhcpd_dns_3).
+    _dns_map: >-
+      {{ dict(range(1, (item.dhcpd_dns | default([])) | length + 1)
+              | map('regex_replace', '^(.*)$', 'dhcpd_dns_\1')
+              | zip(item.dhcpd_dns | default([])))
+         | combine(item.dhcpd_dns is defined
+                   | ternary(dict(range((item.dhcpd_dns | default([])) | length + 1, 5)
+                                  | map('regex_replace', '^(.*)$', 'dhcpd_dns_\1')
+                                  | zip(['', '', '', ''])), {})) }}
+    _wanted: >-
+      {{ {} | combine(item.dhcpd_enabled is defined | ternary({'dhcpd_enabled': item.dhcpd_enabled}, {}))
+            | combine(item.dhcpd_start is defined | ternary({'dhcpd_start': item.dhcpd_start}, {}))
+            | combine(item.dhcpd_stop is defined | ternary({'dhcpd_stop': item.dhcpd_stop}, {}))
+            | combine(item.dhcpd_leasetime is defined | ternary({'dhcpd_leasetime': item.dhcpd_leasetime}, {}))
+            | combine(item.dhcp_relay_servers is defined | ternary({'dhcp_relay_servers': item.dhcp_relay_servers}, {}))
+            | combine(item.dhcp_relay_enabled is defined | ternary({'dhcp_relay_enabled': item.dhcp_relay_enabled}, {}))
+            | combine(_dns_map) }}
+    _change:
+      vlan: "{{ item.vlan }}"
+      name: "{{ _live.name }}"
+      id: "{{ _live._id }}"
+      wanted: "{{ _wanted }}"
+      # `map('default', '', true)` is required: a live network object may simply NOT CARRY a key we
+      # want to set (e.g. dhcpd_dns_3 on a network that has only two resolvers), and a bare `extract`
+      # raises on the missing attribute instead of yielding a default — crashing the role. [F6]
+      before: "{{ dict(_wanted.keys() | zip(_wanted.keys() | map('extract', _live) | map('default', '', true))) }}"
+      changed: "{{ _wanted != dict(_wanted.keys() | zip(_wanted.keys() | map('extract', _live) | map('default', '', true))) }}"
+      merged: "{{ _live | combine(_wanted) }}"
+  loop: "{{ _unifi_requests }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+
+- name: Report the change set
+  ansible.builtin.debug:
+    msg: >-
+      vlan {{ item.vlan }} ({{ item.name }}):
+      {{ 'NO CHANGE' if not (item.changed | bool)
+         else (item.before | to_json) ~ '  ->  ' ~ (item.wanted | to_json) }}
+  loop: "{{ _unifi_changes | default([]) }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+
+- name: Report that nothing will be applied (generate-don't-apply)
+  ansible.builtin.debug:
+    msg: >-
+      unifi_network_dhcp_apply=false — nothing was changed on the controller. Review the diff above,
+      then re-run with -e unifi_network_dhcp_apply=true to apply.
+  when: not ((unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool)
+
+- name: Apply the change set
+  # PUT replaces the whole object, hence `merged` (live object + only our keys).
+  ansible.builtin.uri:
+    url: >-
+      https://{{ unifi_network_dhcp_host | default(unifi_network_dhcp_host__default)
+      }}/proxy/network/api/s/{{ unifi_network_dhcp_site | default(unifi_network_dhcp_site__default)
+      }}/rest/networkconf/{{ item.id }}
+    method: PUT
+    headers:
+      X-API-KEY: "{{ unifi_network_dhcp_api_key | default(unifi_network_dhcp_api_key__default) }}"
+      Accept: application/json
+    body_format: json
+    body: "{{ item.merged }}"
+    validate_certs: "{{ unifi_network_dhcp_validate_certs | default(unifi_network_dhcp_validate_certs__default) }}"
+    status_code: [200]
+  loop: "{{ _unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list }}"
+  loop_control:
+    label: "vlan {{ item.vlan }} ({{ item.name }})"
+  register: _unifi_applied
+  changed_when: true
+  when: (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
+
+- name: Skip the read-back when running against a fixture (test only)
+  ansible.builtin.set_fact:
+    _unifi_verify: "{{ {'json': unifi_network_dhcp_live_fixture} }}"
+  when: unifi_network_dhcp_live_fixture is defined
+
+- name: Verify the applied settings read back as intended
+  ansible.builtin.uri:
+    url: "https://{{ unifi_network_dhcp_host | default(unifi_network_dhcp_host__default) }}/proxy/network/api/s/{{ unifi_network_dhcp_site | default(unifi_network_dhcp_site__default)
+      }}/rest/networkconf"
+    method: GET
+    headers:
+      X-API-KEY: "{{ unifi_network_dhcp_api_key | default(unifi_network_dhcp_api_key__default) }}"
+      Accept: application/json
+    validate_certs: "{{ unifi_network_dhcp_validate_certs | default(unifi_network_dhcp_validate_certs__default) }}"
+    return_content: true
+  register: _unifi_after
+  changed_when: false
+  when:
+    # NOT a second `when:` key — YAML keeps only the last mapping key, so a duplicate silently
+    # DISCARDS the earlier condition. The fixture guard is a member of this list for that reason.
+    - unifi_network_dhcp_live_fixture is not defined
+    - (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
+    - (_unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list) | length > 0
+
+- name: HARD GATE — the controller must now report the values we asked for
+  ansible.builtin.assert:
+    that:
+      - _after_net | combine(item.wanted) == _after_net
+    fail_msg: >-
+      vlan {{ item.vlan }} did not take the requested settings. Wanted {{ item.wanted | to_json }},
+      controller reports
+      {{ dict(item.wanted.keys() | zip(item.wanted.keys() | map('extract', _after_net))) | to_json }}.
+    success_msg: "vlan {{ item.vlan }} ({{ item.name }}): applied and verified."
+    quiet: true
+  vars:
+    _after_net: >-
+      {{ (_unifi_after.json.data | selectattr('vlan', 'defined')
+          | selectattr('vlan', 'equalto', item.vlan | int) | first) }}
+  loop: "{{ _unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+  when:
+    - (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
+    - _unifi_after is not skipped

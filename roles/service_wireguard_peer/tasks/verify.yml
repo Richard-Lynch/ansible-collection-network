@@ -1,0 +1,216 @@
+---
+# READ-ONLY verification of a configured WireGuard peer. Writes nothing, so it is safe to run at
+# any time and is used both as main.yml's postcondition and as a standalone helper.
+#
+# TWO DEPTHS, and the split is deliberate:
+#
+#   LOCAL (default)    interface exists, the installed key is the one we intended, the unit is
+#                      active, the default route is UNCHANGED. All of these MUST pass with the far
+#                      end absent — that is precisely the state after configuring one side, and
+#                      pretending otherwise is what drives people to failed_when:false.
+#
+#   TRANSPORT (opt-in) handshake age and an rx counter delta. Only meaningful once BOTH ends exist.
+#
+# Every read carries check_mode: false so the gates are real under --check too, and every gate
+# asserts rc == 0 alongside its content predicate — a read that did not run is not evidence.
+
+- name: Resolve vars
+  ansible.builtin.include_tasks: _setup_vars.yml
+
+- name: Read the interface state
+  # `wg show <if> dump` — the MACHINE format. Field layout (tab-separated), from wg(8):
+  #   line 1 (interface): private-key  public-key  listen-port  fwmark
+  #   line 2+ (peers)   : public-key  preshared-key  endpoint  allowed-ips  latest-handshake
+  #                       transfer-rx  transfer-tx  persistent-keepalive
+  # Cited here because every positional read below depends on it, and a wrong-index read of a
+  # fixed-column format is the worst class of finding in this repo's silent-guard audit.
+  ansible.builtin.command:
+    argv: [wg, show, "{{ wireguard_interface }}", dump]
+  register: _wg_dump
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: HARD GATE — the interface must exist and be readable
+  ansible.builtin.assert:
+    that:
+      - "_wg_dump.rc == 0"
+      - "_wg_dump.stdout_lines | default([]) | length > 0"
+    fail_msg: >-
+      `wg show {{ wireguard_interface }} dump` failed (rc={{ _wg_dump.rc }}):
+      {{ _wg_dump.stderr | default('') | trim }}. The interface is absent or not readable.
+    success_msg: "Interface {{ wireguard_interface }} exists."
+    quiet: true
+
+- name: Extract the local public key
+  # Interface line, field 2 (index 1) per the layout above.
+  ansible.builtin.set_fact:
+    _wg_local_pubkey: "{{ (_wg_dump.stdout_lines | first).split('\t')[1] | default('') }}"
+
+- name: HARD GATE — the installed key must be the one we intended
+  # THE cross-end failure that actually happens: someone rolls the private key in the secret store, the
+  # committed public key goes stale, and the handshake simply never completes — silently, with
+  # nothing in any log naming the cause. This turns it into a red assert.
+  ansible.builtin.assert:
+    that:
+      - "_wg_local_pubkey == wireguard_public_key"
+    fail_msg: >-
+      PUBKEY DESYNC on {{ inventory_hostname }}. The running interface derives public key
+      '{{ _wg_local_pubkey }}' but this play expects '{{ wireguard_public_key }}'. The private key
+      in the secret store and the public key declared here are not a pair, so the far end will reject
+      every handshake without logging why. Fix the pair before debugging anything else.
+    success_msg: "Installed key matches the committed public key."
+    quiet: true
+  when: wireguard_public_key | default('') | length > 0
+
+- name: Read the routes for every declared AllowedIP
+  # WOULD THIS SURVIVE A REBOOT? A route added at runtime and not written into wg0.conf disappears
+  # on restart, and the symptom is brutal: the tunnel handshakes, AllowedIPs is correct, every
+  # liveness check passes, and traffic silently goes out the default gateway instead.
+  #
+  # Checks the LIVE route, and the config gate below checks it is durable.
+  ansible.builtin.command:
+    argv: [ip, route, get, "{{ (item | ansible.utils.ipaddr('address')) }}"]
+  register: _wg_routes
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop: >-
+    {{ wireguard_peers | default([]) | map(attribute='allowed_ips') | flatten | unique
+       | reject('search', '^0\.0\.0\.0/0$') | list }}
+  loop_control:
+    label: "{{ item }}"
+
+- name: HARD GATE — every declared AllowedIP must route INTO the tunnel
+  vars:
+    _misrouted: >-
+      {{ _wg_routes.results | default([])
+         | rejectattr('stdout', 'search', 'dev ' ~ wireguard_interface)
+         | map(attribute='item') | list }}
+  ansible.builtin.assert:
+    that:
+      - "_misrouted | length == 0"
+    fail_msg: >-
+      These declared CIDRs do NOT route via {{ wireguard_interface }}: {{ _misrouted }}. Cryptokey
+      routing accepts them but the kernel sends them to the default gateway, so the tunnel looks
+      healthy and carries nothing for those destinations.
+    success_msg: "Every declared AllowedIP routes into the tunnel."
+    quiet: true
+  when: wireguard_peers | default([]) | length > 0
+
+- name: Read the on-disk config, to check the routes are DURABLE
+  ansible.builtin.slurp:
+    src: "/etc/wireguard/{{ wireguard_interface }}.conf"
+  register: _wg_conf_disk
+  check_mode: false
+
+- name: HARD GATE — routes must be persisted in the config, not just live
+  # A live route with no PostUp behind it is a reboot away from vanishing. This is the check that
+  # would have caught the failure BEFORE the reboot rather than after it.
+  vars:
+    _conf: "{{ _wg_conf_disk.content | b64decode }}"
+    _needed: >-
+      {{ wireguard_peers | default([]) | map(attribute='allowed_ips') | flatten | unique
+         | reject('search', '^0\.0\.0\.0/0$')
+         | reject('in', [wireguard_address | ansible.utils.ipaddr('subnet')]) | list }}
+    _unpersisted: "{{ _needed | reject('in', _conf) | list }}"
+  ansible.builtin.assert:
+    that:
+      - "_unpersisted | length == 0"
+    fail_msg: >-
+      These CIDRs route correctly NOW but are not in {{ wireguard_interface }}.conf, so they will
+      be LOST at the next reboot: {{ _unpersisted }}. They must appear as PostUp route commands.
+    success_msg: "Routes are persisted in the config — they will survive a reboot."
+    quiet: true
+  when: wireguard_peers | default([]) | length > 0
+
+- name: Read the default route
+  ansible.builtin.command:
+    argv: [ip, -o, route, show, default]
+  register: _wg_defroute
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: HARD GATE — the default route must NOT point at the tunnel
+  # The stranding check, asserted from the outside rather than trusted from Table=off. If a peer
+  # ever gains a 0.0.0.0/0 AllowedIPs and Table is not off, this is what catches it — on the
+  # remote host that route change takes SSH and every public service down at once.
+  ansible.builtin.assert:
+    that:
+      - "wireguard_interface not in (_wg_defroute.stdout | default(''))"
+    fail_msg: >-
+      The DEFAULT ROUTE now goes via {{ wireguard_interface }}: {{ _wg_defroute.stdout | trim }}.
+      This host's traffic is being captured by the tunnel. On a remote host that is a total strand.
+    success_msg: "Default route is unchanged (not via the tunnel)."
+    quiet: true
+
+- name: Report the local state
+  ansible.builtin.debug:
+    msg:
+      - "interface : {{ wireguard_interface }} present"
+      - "public key: matches committed value"
+      - "peers      : {{ (_wg_dump.stdout_lines | default([]))[1:] | length }}"
+      - "default route intact: yes"
+      - "{{ 'transport checks SKIPPED (wireguard_verify_transport=false — correct when the far end may not exist yet)' if not (wireguard_verify_transport | default(false)
+        | bool) else 'transport checks follow' }}"
+
+# --- transport depth ---------------------------------------------------------------------------
+- name: Verify transport
+  when: wireguard_verify_transport | default(false) | bool
+  block:
+    - name: Send traffic across the tunnel to force a handshake
+      # A handshake alone proves the peers agree on keys. It does NOT prove packets flow: WireGuard
+      # drops a decrypted packet whose SOURCE is not inside that peer's AllowedIPs — silently, by
+      # design. So the real test is an rx counter that MOVES.
+      ansible.builtin.command:
+        argv: [ping, -c, "3", -W, "2", "{{ wireguard_probe_target }}"]
+      register: _wg_ping
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read the counters back
+      ansible.builtin.command:
+        argv: [wg, show, "{{ wireguard_interface }}", transfer]
+      register: _wg_xfer
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: HARD GATE — bytes must actually have been received
+      # `wg show <if> transfer` layout: public-key <TAB> rx-bytes <TAB> tx-bytes.
+      vars:
+        _rx: "{{ _wg_xfer.stdout_lines | default([]) | map('split', '\t') | map('last', 0) | list }}"
+        _rx_total: "{{ (_wg_xfer.stdout_lines | default([]) | map('split', '\t') | map(attribute=1) | map('int') | list | sum) | default(0) }}"
+      ansible.builtin.assert:
+        that:
+          - "_wg_xfer.rc == 0"
+          - "_rx_total | int > 0"
+        fail_msg: >-
+          The tunnel has received ZERO bytes ({{ _rx_total }}). A handshake can succeed while every
+          real packet is dropped — that is what an AllowedIPs mismatch looks like, and it is
+          silent. Check that each end's AllowedIPs contains the OTHER end's address.
+        success_msg: "Transport confirmed: {{ _rx_total }} bytes received across the tunnel."
+        quiet: true
+
+    - name: HARD GATE — MTU must not be a blackhole
+      # Ping succeeds and HTTPS stalls when the MTU is too high, because small packets fit and
+      # full-size ones vanish. -M do forbids fragmentation, so this fails loudly instead.
+      ansible.builtin.command:
+        argv: [ping, -c, "2", -W, "2", -M, do, -s, "{{ (wireguard_mtu | int) - 28 }}", "{{ wireguard_probe_target }}"]
+      register: _wg_mtu_probe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Assert the full-size probe succeeded
+      ansible.builtin.assert:
+        that:
+          - "_wg_mtu_probe.rc == 0"
+        fail_msg: >-
+          A full-size ({{ (wireguard_mtu | int) - 28 }} byte) packet did NOT cross the tunnel while
+          small ones did — a classic MTU blackhole. Lower wireguard_mtu and clamp MSS on the
+          forwarding host.
+        success_msg: "Full-size packets cross cleanly — no MTU blackhole."
+        quiet: true

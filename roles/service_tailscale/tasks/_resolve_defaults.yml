@@ -1,0 +1,57 @@
+---
+# AUTO-GENERATED defaults resolver — DO NOT EDIT.
+#
+# Source of truth: roles/service_tailscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_tailscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+
+# Binds every declared option to its generated default, so a caller-supplied value
+# wins and an unsupplied one falls back rather than evaluating Undefined.
+#
+# Include this FIRST from every entrypoint:
+#   - ansible.builtin.include_tasks: _resolve_defaults.yml
+#
+# Role-specific setup logic belongs in tasks/setup_vars.yml, NOT here — this file is
+# overwritten on every generation.
+#
+# TWO BRANCHES, because `set_fact` persists for the whole play. A role invoked twice in
+# one play would otherwise see its OWN leftover facts on the second call, so a later
+# caller that omitted an option silently inherited the earlier caller's value instead of
+# the declared default. On a repeat call this ignores the role's own facts and rebinds
+# the defaults; an include-level `vars:` shadows the fact, so a value the caller DID
+# supply this time still wins. Roles called once per play only ever run the first branch.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.set_fact:
+    tailscale_auth_key: "{{ tailscale_auth_key | default(tailscale_auth_key__default) if tailscale_auth_key__default is defined else tailscale_auth_key | default(omit) }}"
+    tailscale_advertise_routes: "{{ tailscale_advertise_routes | default(tailscale_advertise_routes__default) if tailscale_advertise_routes__default is defined else tailscale_advertise_routes | default(omit) }}"
+    tailscale_advertise_exit_node: "{{ tailscale_advertise_exit_node | default(tailscale_advertise_exit_node__default) if tailscale_advertise_exit_node__default is defined else tailscale_advertise_exit_node | default(omit) }}"
+    tailscale_accept_dns: "{{ tailscale_accept_dns | default(tailscale_accept_dns__default) if tailscale_accept_dns__default is defined else tailscale_accept_dns | default(omit) }}"
+    tailscale_accept_routes: "{{ tailscale_accept_routes | default(tailscale_accept_routes__default) if tailscale_accept_routes__default is defined else tailscale_accept_routes | default(omit) }}"
+    tailscale_tun_path: "{{ tailscale_tun_path | default(tailscale_tun_path__default) if tailscale_tun_path__default is defined else tailscale_tun_path | default(omit) }}"
+    tailscale_version: "{{ tailscale_version | default(tailscale_version__default) if tailscale_version__default is defined else tailscale_version | default(omit) }}"
+  when: not (_service_tailscale__argspec_resolved | default(false))
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
+
+- name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
+  ansible.builtin.set_fact:
+    tailscale_auth_key: "{{ tailscale_auth_key__default if tailscale_auth_key__default is defined else tailscale_auth_key | default(omit) }}"
+    tailscale_advertise_routes: "{{ tailscale_advertise_routes__default if tailscale_advertise_routes__default is defined else tailscale_advertise_routes | default(omit) }}"
+    tailscale_advertise_exit_node: "{{ tailscale_advertise_exit_node__default if tailscale_advertise_exit_node__default is defined else tailscale_advertise_exit_node | default(omit) }}"
+    tailscale_accept_dns: "{{ tailscale_accept_dns__default if tailscale_accept_dns__default is defined else tailscale_accept_dns | default(omit) }}"
+    tailscale_accept_routes: "{{ tailscale_accept_routes__default if tailscale_accept_routes__default is defined else tailscale_accept_routes | default(omit) }}"
+    tailscale_tun_path: "{{ tailscale_tun_path__default if tailscale_tun_path__default is defined else tailscale_tun_path | default(omit) }}"
+    tailscale_version: "{{ tailscale_version__default if tailscale_version__default is defined else tailscale_version | default(omit) }}"
+  when: _service_tailscale__argspec_resolved | default(false)
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
+
+- name: Record that this role has resolved its options in this play
+  ansible.builtin.set_fact:
+    _service_tailscale__argspec_resolved: true

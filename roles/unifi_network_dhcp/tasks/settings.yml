@@ -1,0 +1,36 @@
+---
+# ENTRYPOINT: change a network's DHCP settings — server on/off, range, lease time, DNS, relay
+# targets. Everything EXCEPT the relay flag itself.
+#
+#   - ansible.builtin.include_role:
+#       name: unifi_network_dhcp
+#       tasks_from: settings
+#     vars:
+#       unifi_network_dhcp_networks:
+#         - { vlan: 200, dhcp_relay_servers: ['192.0.2.2'] }
+#         - { vlan: 30, dhcpd_enabled: true, dhcpd_start: "203.0.113.11", dhcpd_stop: "203.0.113.251" }
+#
+# `dhcp_relay_enabled` is NOT accepted here. It is the one field whose behaviour depends on what
+# else is in the request, so it gets its own entrypoints (relay_on / relay_off) where that
+# constraint can be enforced by the input shape rather than by a runtime check.
+#
+# `dhcp_relay_servers` DOES belong here — it is an ordinary setting, and treating it as part of the
+# relay flag is precisely the mistake that left the networks it configured with no DHCP server.
+
+- name: Reject the relay flag, which has its own entrypoints
+  ansible.builtin.assert:
+    that:
+      - item.dhcp_relay_enabled is not defined
+    fail_msg: >-
+      vlan {{ item.vlan }} passes dhcp_relay_enabled to `settings`. Use `tasks_from: relay_on` (the
+      flag alone, after the settings are applied) or `tasks_from: relay_off` (which may carry other
+      fields). Sending the flag with other settings makes the controller drop it silently.
+    quiet: true
+  loop: "{{ unifi_network_dhcp_networks | default([]) }}"
+  loop_control:
+    label: "vlan {{ item.vlan }}"
+
+- name: Apply the settings
+  ansible.builtin.include_tasks: _apply.yml
+  vars:
+    _unifi_requests: "{{ unifi_network_dhcp_networks | default([]) }}"

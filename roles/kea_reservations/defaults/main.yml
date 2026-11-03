@@ -1,0 +1,26 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/kea_reservations/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate kea_reservations
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Require every declaration to explain why its address must not move.
+# ON by default, and the reason is not bureaucratic: the rationale is the
+# most valuable part of a reservation and the part that cannot be
+# reconstructed later. That an address is hardcoded in a dozen agents'
+# configs, is the storage portal a stack mounts through, or sits behind
+# router port forwards is not visible in the address, so the next person
+# either keeps a reservation nobody can justify or moves one that silently
+# breaks things.
+kea_reservations_require_why__default: true
+
+# Reservations merged IN ADDITION to the directory, validated identically.
+# Useful when migrating from a single inventory list: the old list can be
+# merged alongside the per-host files so both can be proven equivalent
+# before the old one is deleted. Normally empty.
+kea_reservations_extra__default: []

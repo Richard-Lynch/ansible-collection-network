@@ -1,0 +1,28 @@
+---
+# Apply the computed transaction. One nsupdate message per run, so the whole reconcile is atomic.
+
+- name: Apply — send the transaction
+  ansible.builtin.shell:
+    cmd: |
+      nsupdate -k {{ _svc_keyfile }} <<'NSUPDATE_EOF'
+      {{ svc_dns_script }}
+      NSUPDATE_EOF
+  register: _svc_ns
+  changed_when: ((svc_dns_adds | length) + (svc_dns_deletes | length)) > 0
+  failed_when: false
+
+- name: HARD GATE — nsupdate must have SENT the transaction
+  # Checked BEFORE the read-back. A client-side failure (bad keyfile grammar, unreachable server)
+  # exits non-zero having transmitted nothing, and the read-back would then fail for a completely
+  # different reason than the one reported — sending you to the wrong side of the wire.
+  ansible.builtin.assert:
+    that:
+      - _svc_ns.rc == 0
+    fail_msg: >-
+      nsupdate exited rc={{ _svc_ns.rc }} WITHOUT applying:
+      {{ _svc_ns.stderr | default('') | trim }}.
+      REFUSED means allow-update does not admit this key for {{ svc_dns_zone }};
+      NOTAUTH(BADKEY) means bind9 does not know the key at all (check it is in named.conf.keys AND
+      that bind9 was restarted after it was added).
+    success_msg: "Transaction accepted by the server."
+    quiet: true

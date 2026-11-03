@@ -1,0 +1,37 @@
+---
+# AUTO-GENERATED defaults file — DO NOT EDIT.
+#
+# Source of truth: roles/service_tailscale/meta/argument_specs.py
+# Regenerate:      venv/bin/python tools/argspec/cli.py x generate service_tailscale
+#
+# Edits here are silently overwritten on the next generation. To change a value or its
+# documentation, change the OptionSpec in the source file above — descriptions there
+# are emitted as the comments in this file.
+# Entrypoint:      main
+
+# Pre-auth key, consumed ONLY when the node is not already logged in to
+# tailscale_login_server. A node that is already joined ignores it, so a
+# re-run needs no new key. Tags come from the key, not from this role.
+tailscale_auth_key__default: ''
+
+# Subnets this node routes for the tailnet (subnet router).
+tailscale_advertise_routes__default: []
+
+# Offer this node as an exit node for all internet traffic.
+tailscale_advertise_exit_node__default: false
+
+# Let the control server rewrite this node's resolver. Off by default: on a
+# server — and above all on a DNS server — the tailnet must not take over
+# the host's own name resolution.
+tailscale_accept_dns__default: false
+
+# Install other nodes' subnet routes. Off for a subnet router, which is
+# already ON the networks it advertises.
+tailscale_accept_routes__default: false
+
+# TUN device the role requires before installing anything. Overridable
+# only so a test can prove the gate fires.
+tailscale_tun_path__default: /dev/net/tun
+
+# Pinned package version from pkgs.tailscale.com/stable.
+tailscale_version__default: 1.104.1

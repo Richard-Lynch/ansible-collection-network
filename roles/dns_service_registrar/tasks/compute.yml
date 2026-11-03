@@ -1,0 +1,60 @@
+---
+# Compute the add/delete sets and the nsupdate script. PURE LOGIC — no I/O, no writes.
+#
+# Split into its own task file so molecule can exercise THE REAL CODE with a stubbed
+# `svc_dns_current` instead of re-deriving the filter chain in a verify file. The tautology
+# trap: a verify that re-computes the role's own selectattr/map chain over a hand-typed
+# list asserts the copy against itself and stays green through a real regression.
+
+- name: Compute — records in this zone that belong to THIS host
+  # Ownership is carried by the CNAME TARGET, which is already in the data — no TXT registry, no
+  # heritage marker. A svc zone can be shared by several hosts, so a run must never consider, and
+  # therefore never delete, a record pointing at someone else's host.
+  ansible.builtin.set_fact:
+    _svc_mine: >-
+      {{ svc_dns_current | default([])
+         | selectattr('target', 'equalto', svc_dns_target) | map(attribute='name') | list }}
+    _svc_foreign: >-
+      {{ svc_dns_current | default([])
+         | rejectattr('target', 'equalto', svc_dns_target) | list }}
+
+- name: Compute — the diff
+  ansible.builtin.set_fact:
+    svc_dns_adds: "{{ (_svc_want | default(svc_dns_names)) | difference(_svc_mine) | sort }}"
+    svc_dns_deletes: "{{ _svc_mine | difference(_svc_want | default(svc_dns_names)) | sort }}"
+
+- name: Compute — names claimed by ANOTHER host
+  # A desired name that already exists pointing somewhere else is two hosts claiming one label.
+  # Last-writer-wins here would silently repoint a live service — the same label can legitimately
+  # name different services in different zones. That is a human decision, so: hard fail.
+  ansible.builtin.set_fact:
+    _svc_conflicts: >-
+      {{ _svc_foreign | selectattr('name', 'in', (_svc_want | default(svc_dns_names))) | list }}
+
+- name: HARD GATE — refuse to steal a name from another host
+  ansible.builtin.assert:
+    that:
+      - (_svc_conflicts | length) == 0
+    fail_msg: >-
+      {{ _svc_conflicts | map(attribute='name') | list }} already exist in {{ svc_dns_zone }}
+      pointing at {{ _svc_conflicts | map(attribute='target') | list }}, but this run wants them for
+      {{ svc_dns_target }}. Two hosts are claiming the same service label — resolve it in the
+      service definitions rather than letting a reconcile silently repoint a live name.
+    success_msg: "No cross-host name conflicts."
+    quiet: true
+
+- name: Compute — render the nsupdate transaction
+  # Joined on a REAL newline (_svc_nl). A literal '\n' inside a YAML folded scalar ships the two
+  # characters backslash+n, which nsupdate reads as garbage — it can silently glue a record onto
+  # the previous line and still pass named-checkzone.
+  # Trailing dots on every FQDN: the zone file carries an $ORIGIN, so a relative name becomes
+  # name.zone.zone.
+  ansible.builtin.set_fact:
+    svc_dns_script: >-
+      {{ (['server ' ~ bind9_addr, 'zone ' ~ svc_dns_zone]
+          + (svc_dns_deletes | map('regex_replace', '^(.*)$',
+             'update delete \1.' ~ svc_dns_zone ~ '. CNAME') | list)
+          + (svc_dns_adds | map('regex_replace', '^(.*)$',
+             'update add \1.' ~ svc_dns_zone ~ '. ' ~ (svc_dns_ttl | default(60) | string)
+             ~ ' CNAME ' ~ svc_dns_target ~ '.') | list)
+          + ['send']) | join(_svc_nl) }}

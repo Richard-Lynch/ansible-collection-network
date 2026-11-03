@@ -1,0 +1,59 @@
+{# named.conf.options — options{} + logging{}, rendered FRESH on every run (unlike named.conf itself,
+   which is force:false so the appended zone stanzas survive re-runs). Split out specifically so that
+   changing bind9_recursion / bind9_forward_ip actually takes effect on an already-provisioned host —
+   inside the force:false file a second run could never change them. #}
+options {
+    directory "/var/cache/bind";
+    recursion {{ 'yes' if bind9_recursion else 'no' }};
+{# allow-recursion only means anything with recursion on; emitting it with `recursion no` makes
+   named-checkconf warn 'both "recursion no;" and "allow-recursion" active' on every load. #}
+{% if bind9_recursion %}
+    allow-recursion { {{ bind9_allow_query }}; };
+{% endif %}
+    allow-query { {{ bind9_allow_query }}; };
+    allow-transfer { {{ bind9_allow_transfer }} };
+
+{% if bind9_recursion %}
+    forwarders {
+{% for _fwd in (bind9_forwarders if (bind9_forwarders | default([]) | length) > 0
+                else [bind9_forward_ip ~ ' port ' ~ bind9_forward_port]) %}
+        {{ _fwd }};
+{% endfor %}
+    };
+
+    forward only;
+{% endif %}
+    dnssec-validation auto;
+
+    querylog {{ 'yes' if bind9_querylog else 'no' }};
+};
+
+// Log to stderr (docker captures it) — a file channel needs a writable /var/log the container `bind`
+// user doesn't have, and bind9 exits "permission denied" trying to open it.
+//
+// NOTE: with `named -g` (this image's entrypoint: "not using config file logging statement for
+// logging due to -g option"), bind9 IGNORES this entire logging{} block — -g sends ALL output,
+// every category, through its own built-in stderr stream with no category tagging, despite
+// `print-category yes` here.
+//
+// PRACTICAL IMPACT: none for queryability, since -g's default routing already sends every category
+// (update/update-security/security/general included) to stderr, which docker captures and any
+// container-log shipper can collect. What's lost is CATEGORY as a separate field to filter on, so a
+// log query has to text-match instead, e.g. (LogQL, for a stream labelled service_name="bind9"):
+//   {service_name="bind9"} |= "signer" |= "approved"          -- DDNS updates that got past TSIG
+//   {service_name="bind9"} |= "update unsuccessful"           -- DDNS updates bind9 rejected
+//   {service_name="bind9"} |= "journal" or |= "permission denied"  -- a zones-dir permission fault
+// This block is left in place (harmless, and correct if the image/entrypoint ever drops -g or gains
+// its own way to honour logging{}).
+logging {
+    channel stderr_log {
+        stderr;
+        severity info;
+        print-time yes;
+        print-category yes;
+    };
+    category update { stderr_log; };
+    category update-security { stderr_log; };
+    category security { stderr_log; };
+    category general { stderr_log; };
+};

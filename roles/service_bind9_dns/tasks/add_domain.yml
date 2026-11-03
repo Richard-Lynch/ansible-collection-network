@@ -1,0 +1,53 @@
+---
+# Ensure a PRIMARY domain zone exists (zone file + named.conf STATIC stanza). Idempotent.
+# Requires: bind9_domain (e.g. "example.com").
+
+- name: "Add_domain — default serial (YYYYMMDD01) when none supplied"
+  ansible.builtin.set_fact:
+    bind9_default_serial: "{{ now(fmt='%Y%m%d') }}01"
+
+- name: "Add_domain — does the zone file already exist?"
+  ansible.builtin.stat:
+    path: "{{ bind9_config_dir }}/zones/{{ bind9_domain }}.zone"
+  register: _domain_zone
+
+- name: "Add_domain — create the zone file (when absent)"
+  ansible.builtin.template:
+    src: master.domain.zone.j2
+    dest: "{{ bind9_config_dir }}/zones/{{ bind9_domain }}.zone"
+    mode: "0644"
+  when: not _domain_zone.stat.exists
+  notify: Restart bind9
+
+- name: "Add_domain — reconcile the seeded `dns` record (create-once zones drift)"
+  # The zone file is rendered CREATE-ONCE (above), so on an already-provisioned host the seeded
+  # `dns` A record keeps whatever value it was first written with — e.g. a management address,
+  # while `dns` must name the SERVICE address, which can move between hosts.
+  #
+  # Reconciled with lineinfile, NOT by registering `dns` through add_host_to_domain: that writes
+  # through blockinfile with its own marker, so it would ADD a second `dns` A record beside the
+  # seeded one and hand out both by round-robin.
+  ansible.builtin.lineinfile:
+    path: "{{ bind9_config_dir }}/zones/{{ bind9_domain }}.zone"
+    regexp: "^dns\\s+IN\\s+A\\s+"
+    line: "dns\t\t\t\tIN\t\t\t\tA\t\t\t\t{{ bind9_dns_ip }}"
+    backrefs: false
+  when:
+    - bind9_dns_ip is defined
+    - _domain_zone.stat.exists
+  notify: Restart bind9
+
+- name: "Add_domain — register the zone in named.conf (STATIC block, allow-update none)"
+  ansible.builtin.blockinfile:
+    path: "{{ bind9_config_dir }}/config/named.conf"
+    marker: "// {mark} ANSIBLE MANAGED BLOCK: {{ bind9_domain }}"
+    insertafter: "^// --- STATIC ---$"
+    block: |
+      zone "{{ bind9_domain }}" {
+          type master;
+          file "/etc/bind/zones/{{ bind9_domain }}.zone";
+          allow-update { none; };
+          notify yes;
+      };
+    mode: "0644"
+  notify: Restart bind9

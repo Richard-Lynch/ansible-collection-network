@@ -1,0 +1,56 @@
+---
+# Assertions are HAND-TYPED LITERALS. No selectattr/map/difference over the stubs — re-deriving the
+# role's own filter chain here would compare the copy against itself and stay green through a real
+# regression (the tautology trap). Every condition is quoted whole on one line, since a
+# comment between `that:` items can swallow the next condition into a truthy string.
+- name: Verify
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Load the results converge computed
+      ansible.builtin.set_fact:
+        r: "{{ lookup('file', '/tmp/molecule_dns_service_registrar.json') | from_json }}"
+
+    - name: Case 1 — diff is exactly right, and the foreign record is untouched
+      ansible.builtin.assert:
+        that:
+          - "r.c1_adds == ['newname']"
+          - "r.c1_deletes == ['stalename']"
+        fail_msg: >-
+          Case 1 wrong. adds={{ r.c1_adds }} (want ['newname']),
+          deletes={{ r.c1_deletes }} (want ['stalename']).
+          'foreign' appearing in deletes means GC is not scoped by target and this role would
+          delete another host's records from a shared zone.
+          'keepme' appearing in adds means an already-correct record causes churn.
+        success_msg: "Case 1: correct add/delete, foreign record untouched, no churn on keepme."
+        quiet: true
+
+    - name: Case 1 — the rendered nsupdate script is exactly right
+      # Pins the whole transaction shape: real newlines (not literal backslash-n), trailing dots on
+      # every FQDN (an $ORIGIN-relative name becomes name.zone.zone), delete-before-add ordering,
+      # and the TTL/target on the add line.
+      ansible.builtin.assert:
+        that:
+          - "r.c1_script.split('\n') == ['server 192.0.2.3', 'zone svc.apps.example.com', 'update delete stalename.svc.apps.example.com. CNAME', 'update add newname.svc.apps.example.com. 60 CNAME app1.apps.example.com.', 'send']"
+        fail_msg: "Case 1 script wrong. Got: {{ r.c1_script | replace('\n', ' | ') }}"
+        success_msg: "Case 1: nsupdate script renders exactly as expected."
+        quiet: true
+
+    - name: Case 2 — empty zone adds everything and deletes nothing
+      ansible.builtin.assert:
+        that:
+          - "r.c2_adds == ['alpha', 'beta']"
+          - "r.c2_deletes == []"
+        fail_msg: "Case 2 wrong. adds={{ r.c2_adds }} (want ['alpha','beta']), deletes={{ r.c2_deletes }} (want [])."
+        success_msg: "Case 2: first run adds all, deletes none."
+        quiet: true
+
+    - name: Case 3 — a name claimed by another host must hard-fail
+      ansible.builtin.assert:
+        that:
+          - "r.c3_failed | bool"
+        fail_msg: >-
+          Case 3 did NOT fail. The role accepted a name already pointing at another host, so a
+          reconcile could silently repoint a live service.
+        success_msg: "Case 3: cross-host name conflict correctly refused."
+        quiet: true

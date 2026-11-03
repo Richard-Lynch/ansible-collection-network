@@ -1,0 +1,23 @@
+---
+# Resolve caller-supplied vars over the GENERATED defaults. defaults/main.yml holds `*__default`
+# names (generated from meta/argument_specs.py), not the plain names the tasks use — same pattern as
+# roles/textfile_exporters/tasks/setup_vars.yml. Every entrypoint includes this first; without it,
+# vars silently resolve to Undefined rather than their defaults.
+
+- name: Resolve defaults
+  ansible.builtin.set_fact:
+    wireguard_interface: "{{ wireguard_interface | default(wireguard_interface__default) }}"
+    wireguard_address: "{{ wireguard_address | default(wireguard_address__default | default('')) }}"
+    wireguard_listen_port: "{{ wireguard_listen_port | default(wireguard_listen_port__default) }}"
+    wireguard_private_key_path: "{{ wireguard_private_key_path | default(wireguard_private_key_path__default) }}"
+    wireguard_private_key: "{{ wireguard_private_key | default(wireguard_private_key__default) }}"
+    wireguard_public_key: "{{ wireguard_public_key | default(wireguard_public_key__default) }}"
+    wireguard_peers: "{{ wireguard_peers | default(wireguard_peers__default) }}"
+    wireguard_mtu: "{{ wireguard_mtu | default(wireguard_mtu__default) }}"
+    wireguard_table: "{{ wireguard_table | default(wireguard_table__default) }}"
+    wireguard_forward: "{{ wireguard_forward | default(wireguard_forward__default) }}"
+    wireguard_manage_nftables: "{{ wireguard_manage_nftables | default(wireguard_manage_nftables__default) }}"
+    wireguard_inbound_allow: "{{ wireguard_inbound_allow | default(wireguard_inbound_allow__default) }}"
+    wireguard_apply: "{{ wireguard_apply | default(wireguard_apply__default) }}"
+    wireguard_render_dir: "{{ wireguard_render_dir | default(wireguard_render_dir__default) }}"
+  no_log: true # wireguard_private_key passes through here

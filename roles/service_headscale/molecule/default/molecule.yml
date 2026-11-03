@@ -1,0 +1,25 @@
+# Render tier. The role deploys containers on a public host, so a
+# scenario cannot run it end to end. What it CAN prove is that the templates render to what
+# Headscale and traefik will actually parse, and that the role's own guards refuse the two configs
+# that would ship silently wrong: an empty (allow-all) policy, and a base_domain Headscale rejects.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

@@ -1,0 +1,25 @@
+# Guard tier. Everything past the TUN gate installs a package
+# and joins a live control server, which no scenario may do. What it proves is the gate that stands
+# in front of all of that: the REAL role, pointed at a TUN path that does not exist, must refuse
+# before touching apt — so a guest without the device fails loudly instead of half-installing.
+---
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: localhost
+provisioner:
+  name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../"
+    ANSIBLE_COLLECTIONS_PATH: "${MOLECULE_PROJECT_DIRECTORY}/../../collections.galaxy:${MOLECULE_PROJECT_DIRECTORY}/../../../../.."
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    converge: converge.yml
+    verify: verify.yml
+verifier:
+  name: ansible

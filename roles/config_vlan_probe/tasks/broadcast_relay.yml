@@ -1,0 +1,149 @@
+---
+# ENTRYPOINT: relay declared UDP broadcasts from one VLAN leg to another (files/broadcast_relay.py).
+#
+# WHY HERE, for the same reason as the wake endpoint: a broadcast cannot cross a VLAN, and this is
+# the one guest with a leg on every segment. The typical consumer is LAN game discovery — a client
+# on one VLAN asking "any servers?" by broadcast, a server on another VLAN that can only answer if
+# it hears the question.
+#
+# SECURITY POSTURE: the relay list is the allowlist — declared ports, legs and one direction each.
+# It re-emits only packets that ARRIVED as broadcasts from a sender inside the source leg's own
+# subnet, capped in size and rate (see the script's header). It preserves the sender's address,
+# which needs CAP_NET_RAW — granted to this one unit, as an ambient capability on a DynamicUser,
+# not by running it as root.
+#
+# Generate-don't-apply like the rest of the role: a default run reports and changes nothing.
+
+- name: Resolve declared options over their generated defaults
+  ansible.builtin.include_tasks: _resolve_defaults.yml
+
+- name: Check the constraints the argspec cannot enforce
+  ansible.builtin.include_tasks: _argspec_guards.yml
+
+- name: Assert a relay was declared
+  ansible.builtin.assert:
+    that:
+      - config_vlan_probe_relays | length > 0
+    fail_msg: >-
+      config_vlan_probe_relays is empty — nothing to relay. Declare them in the probe host's
+      inventory as [{name, port, from_broadcast, to_broadcast}].
+    quiet: true
+
+- name: Start the leg map empty
+  # The loop below accumulates; a second inclusion in one play must not see a stale map.
+  ansible.builtin.set_fact:
+    _cvp_legs: {}
+    _cvp_relays_resolved: []
+
+- name: Map each leg's broadcast address to the interface that holds it
+  # READ FROM THE GUEST'S OWN FACTS, never declared: an interface name written in inventory would
+  # be a second source of truth for "which leg is which", and a mis-tagged netif would then relay
+  # into the wrong segment while reading as configured. (Ansible names an interface's facts with
+  # `-` turned into `_`.)
+  ansible.builtin.set_fact:
+    _cvp_legs: "{{ _cvp_legs | combine({_f.ipv4.broadcast: _f}) }}"
+  loop: "{{ ansible_interfaces }}"
+  vars:
+    _f: "{{ hostvars[inventory_hostname]['ansible_' ~ (item | replace('-', '_'))] | default({}) }}"
+  when: (_f.ipv4.broadcast | default('')) | length > 0
+
+- name: Resolve the relays against the legs actually held
+  ansible.builtin.set_fact:
+    _cvp_relays_resolved: >-
+      {{ _cvp_relays_resolved + [{
+           'name': item.name,
+           'port': item.port | int,
+           'from_iface': _cvp_legs[item.from_broadcast].device,
+           'to_iface': _cvp_legs[item.to_broadcast].device,
+           'from_network': (_cvp_legs[item.from_broadcast].ipv4.network ~ '/'
+                            ~ _cvp_legs[item.from_broadcast].ipv4.netmask) | ansible.utils.ipaddr('net'),
+           'from_broadcast': item.from_broadcast,
+           'to_broadcast': item.to_broadcast,
+         }] }}
+  loop: "{{ config_vlan_probe_relays }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.from_broadcast in _cvp_legs
+    - item.to_broadcast in _cvp_legs
+    - item.from_broadcast != item.to_broadcast
+
+- name: HARD GATE — every relay names two different legs this guest holds
+  # A relay into a segment the guest is not on would send successfully and reach nothing — the
+  # same silent failure the wake endpoint's reachability assert exists for. A relay that was
+  # skipped above (leg not held, or both ends the same leg) is what makes the counts differ.
+  ansible.builtin.assert:
+    that:
+      - (_cvp_relays_resolved | length) == (config_vlan_probe_relays | length)
+    fail_msg: >-
+      Not every declared relay maps onto two distinct legs this guest holds. Declared:
+      {{ config_vlan_probe_relays }}. Resolved: {{ _cvp_relays_resolved | map(attribute='name') | list }}.
+      Legs held (broadcast -> interface): {{ _cvp_legs | dict2items | map(attribute='key')
+      | zip(_cvp_legs | dict2items | map(attribute='value.device')) | list }}.
+    success_msg: >-
+      {% for r in _cvp_relays_resolved %}{{ r.name }}: udp/{{ r.port }} {{ r.from_iface }} -> {{ r.to_iface }}; {% endfor %}
+    quiet: true
+
+- name: Report the relay plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Deploying' if (config_vlan_probe_apply | bool) else 'WOULD deploy' }} the broadcast relay:
+      {{ _cvp_relays_resolved | map(attribute='name') | list | join(', ') }}
+      ({{ config_vlan_probe_relay_rate }} pkt/s cap).
+      {{ '' if (config_vlan_probe_apply | bool) else 'Re-run with config_vlan_probe_apply=true.' }}
+
+- name: Deploy the relay
+  when: config_vlan_probe_apply | bool
+  block:
+    - name: Install the relay script
+      ansible.builtin.copy:
+        src: broadcast_relay.py
+        dest: "{{ config_vlan_probe_relay_script }}"
+        mode: "0755"
+        owner: root
+        group: root
+      notify: Restart the broadcast relay
+
+    - name: Install the unit
+      # The resolved relays are rendered INTO ExecStart, so a changed relay is a changed unit
+      # file — which is what makes the restart handler fire.
+      ansible.builtin.template:
+        src: broadcast-relay.service.j2
+        dest: "/etc/systemd/system/{{ config_vlan_probe_relay_unit }}"
+        mode: "0644"
+        owner: root
+        group: root
+      notify: Restart the broadcast relay
+
+    - name: Enable and start it
+      ansible.builtin.systemd_service:
+        name: "{{ config_vlan_probe_relay_unit }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Flush handlers so the read-back sees the new configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the relay's own status back
+      # The PROCESS's report of what it bound, not systemd's view of the unit: a unit can be
+      # active with a process that failed to open its raw socket.
+      ansible.builtin.slurp:
+        src: /run/iaac-broadcast-relay/status.json
+      register: _cvp_relay_status
+      retries: 10
+      delay: 2
+      until: _cvp_relay_status is succeeded
+
+    - name: HARD GATE — the running relay loaded exactly the declared relays
+      ansible.builtin.assert:
+        that:
+          - _s.ok | bool
+          - (_s.relays | map(attribute='name') | sort) == (_cvp_relays_resolved | map(attribute='name') | sort)
+          - (_s.relays | map(attribute='from_iface') | sort) == (_cvp_relays_resolved | map(attribute='from_iface') | sort)
+          - (_s.relays | map(attribute='to_iface') | sort) == (_cvp_relays_resolved | map(attribute='to_iface') | sort)
+        fail_msg: "Relay is running with the wrong configuration: {{ _s }}"
+        success_msg: "Relay live: {{ _s.relays }}"
+        quiet: true
+      vars:
+        _s: "{{ _cvp_relay_status.content | b64decode | from_json }}"

@@ -1,0 +1,145 @@
+---
+# Renders the REAL role into a temp directory (wireguard_render_dir), with apply=false so nothing
+# is installed and no interface is touched.
+- name: Converge — render a peer config via the real role
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    _tmp: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') | default('/tmp', true) }}/wg"
+    # A syntactically valid but meaningless key — never a real one.
+    _fake_key: "QFXaJ1yqEuc5C5tHTVEB6EQvxvZ6qsNjF3rMKvVvS1o="
+    _fake_pub: "hV1xkxPHXQFsVvVXBw4KRuVMk6zZ0aQ5nT8vLwXyZ3E="
+
+  tasks:
+    - name: Create the render dir
+      ansible.builtin.file:
+        path: "{{ _tmp }}"
+        state: directory
+        mode: "0700"
+
+    # --- the SITE shape: NAT'd initiator, keepalive, manages nftables --------------------------
+    - name: Render the site (initiator) end
+      ansible.builtin.include_role:
+        name: service_wireguard_peer
+      vars:
+        wireguard_render_dir: "{{ _tmp }}"
+        wireguard_apply: false
+        wireguard_interface: wgsite
+        wireguard_address: "198.18.254.1/30"
+        wireguard_private_key: "{{ _fake_key }}"
+        wireguard_public_key: "{{ _fake_pub }}"
+        wireguard_mtu: 1420
+        wireguard_peers:
+          - public_key: "{{ _fake_pub }}"
+            allowed_ips: ["198.18.254.2/32"]
+            endpoint: "203.0.113.64:51820"
+            persistent_keepalive: 25
+
+    # --- the LISTENER shape: fixed listener, no keepalive, NO nftables ---------------------------
+    - name: Render the listener end
+      ansible.builtin.include_role:
+        name: service_wireguard_peer
+      vars:
+        wireguard_render_dir: "{{ _tmp }}"
+        wireguard_apply: false
+        wireguard_interface: wglisten
+        wireguard_address: "198.18.254.2/30"
+        wireguard_listen_port: 51820
+        wireguard_private_key: "{{ _fake_key }}"
+        wireguard_public_key: "{{ _fake_pub }}"
+        wireguard_peers:
+          - public_key: "{{ _fake_pub }}"
+            allowed_ips: ["198.18.254.1/32", "192.0.2.0/24"]
+
+    # --- NEGATIVE TESTS: each guard must FIRE. These are the highest-value cases in the scenario,
+    # because the guards are the only thing standing between a typo and a stranded remote host.
+    - name: "NEGATIVE — a default-route AllowedIPs must be refused"
+      block:
+        - ansible.builtin.include_role:
+            name: service_wireguard_peer
+          vars:
+            wireguard_render_dir: "{{ _tmp }}"
+            wireguard_apply: false
+            wireguard_interface: wgneg1
+            wireguard_address: "198.18.254.1/30"
+            wireguard_private_key: "{{ _fake_key }}"
+            wireguard_peers:
+              - public_key: "{{ _fake_pub }}"
+                allowed_ips: ["0.0.0.0/0"]
+        - name: Record that the default-route guard did NOT fire
+          ansible.builtin.set_fact:
+            _guard_defroute: "NOT FIRED"
+      rescue:
+        - name: Record that the default-route guard fired
+          ansible.builtin.set_fact:
+            _guard_defroute: "FIRED"
+
+    - name: "NEGATIVE — an out-of-range MTU must be refused"
+      block:
+        - ansible.builtin.include_role:
+            name: service_wireguard_peer
+          vars:
+            wireguard_render_dir: "{{ _tmp }}"
+            wireguard_apply: false
+            wireguard_interface: wgneg2
+            wireguard_address: "198.18.254.1/30"
+            wireguard_private_key: "{{ _fake_key }}"
+            wireguard_mtu: 1500
+            wireguard_peers:
+              - public_key: "{{ _fake_pub }}"
+                allowed_ips: ["198.18.254.2/32"]
+        - ansible.builtin.set_fact:
+            _guard_mtu: "NOT FIRED"
+      rescue:
+        - ansible.builtin.set_fact:
+            _guard_mtu: "FIRED"
+
+    - name: "NEGATIVE — an empty private key must be refused"
+      block:
+        - ansible.builtin.include_role:
+            name: service_wireguard_peer
+          vars:
+            wireguard_render_dir: "{{ _tmp }}"
+            wireguard_apply: false
+            wireguard_interface: wgneg3
+            wireguard_address: "198.18.254.1/30"
+            wireguard_private_key: ""
+            wireguard_peers:
+              - public_key: "{{ _fake_pub }}"
+                allowed_ips: ["198.18.254.2/32"]
+        - ansible.builtin.set_fact:
+            _guard_key: "NOT FIRED"
+      rescue:
+        - ansible.builtin.set_fact:
+            _guard_key: "FIRED"
+
+    - name: "NEGATIVE — a peer routing its own endpoint must be refused"
+      block:
+        - ansible.builtin.include_role:
+            name: service_wireguard_peer
+          vars:
+            wireguard_render_dir: "{{ _tmp }}"
+            wireguard_apply: false
+            wireguard_interface: wgneg4
+            wireguard_address: "198.18.254.1/30"
+            wireguard_private_key: "{{ _fake_key }}"
+            wireguard_peers:
+              - public_key: "{{ _fake_pub }}"
+                allowed_ips: ["203.0.113.64/32"]
+                endpoint: "203.0.113.64:51820"
+        - ansible.builtin.set_fact:
+            _guard_endpoint: "NOT FIRED"
+      rescue:
+        - ansible.builtin.set_fact:
+            _guard_endpoint: "FIRED"
+
+    - name: Persist the guard results for verify
+      ansible.builtin.copy:
+        dest: "{{ _tmp }}/guards.txt"
+        mode: "0644"
+        content: |
+          defroute={{ _guard_defroute }}
+          mtu={{ _guard_mtu }}
+          key={{ _guard_key }}
+          endpoint={{ _guard_endpoint }}
