@@ -60,7 +60,7 @@
         kea_reservations_dir: "{{ _fixtures }}"
         kea_reservations_extra:
           - subnet_id: 40
-            hw_address: "BC:24:11:AA:BB:CC"
+            hw_address: "BE:24:11:AA:BB:CC"
             ip_address: "198.51.100.9"
             hostname: "extra-host"
             why: "supplied by the caller during migration"
