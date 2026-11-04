@@ -7,6 +7,7 @@
 .github/workflows/disclose.yml
 .github/workflows/release.yml
 .gitignore
+.python-version
 CHANGELOG.md
 LICENSE
 README.md
@@ -24,6 +25,7 @@ plugins/filter/hosting_edge_merge_ingress.yml
 plugins/filter/hosting_edge_winner.yml
 plugins/filter/hosting_edge_winner_diff.yml
 plugins/filter/hosting_edge_winner_map.yml
+renovate.json
 roles/cloudflare_access_mtls/README.md
 roles/cloudflare_access_mtls/defaults/associate.yml
 roles/cloudflare_access_mtls/defaults/ca.yml
