@@ -30,6 +30,7 @@ argument_specs:
         type: str
         required: false
         default: CHANGE_ME_VIA_1PASSWORD
+        no_log: true
       unifi_network_dhcp_validate_certs:
         description:
           - Whether to validate the controller's TLS certificate. The UDM presents a self-signed cert.

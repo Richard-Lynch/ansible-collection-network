@@ -79,3 +79,4 @@ argument_specs:
         description: UniFi API key for the X-API-KEY header. Never defaulted, never logged.
         type: str
         required: true
+        no_log: true

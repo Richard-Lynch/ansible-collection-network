@@ -12,6 +12,7 @@ argument_specs = ArgumentSpecs(
             author=DEFAULT_AUTHOR,
             options={
                 "pihole_web_password": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description="Web/API password (from your secrets manager). Placeholder is rejected.",
@@ -206,6 +207,7 @@ argument_specs = ArgumentSpecs(
                     description="false = report the diff only (default); true = reconcile via the API.",
                 ),
                 "pihole_web_password": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description="Web/API password (from your secrets manager). Placeholder is rejected.",

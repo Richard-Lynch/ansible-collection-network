@@ -32,6 +32,9 @@
     unifi_network_dhcp_networks: "{{ unifi_network_dhcp_networks | default(unifi_network_dhcp_networks__default) if unifi_network_dhcp_networks__default is defined else unifi_network_dhcp_networks | default(omit) }}"
     unifi_network_dhcp_apply: "{{ unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default) if unifi_network_dhcp_apply__default is defined else unifi_network_dhcp_apply | default(omit) }}"
   when: not (_unifi_network_dhcp__argspec_resolved | default(false))
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
 
 - name: Rebind the defaults on a repeat call, ignoring this role's own leftover facts
   ansible.builtin.set_fact:
@@ -41,6 +44,9 @@
     unifi_network_dhcp_networks: "{{ unifi_network_dhcp_networks__default if unifi_network_dhcp_networks__default is defined else unifi_network_dhcp_networks | default(omit) }}"
     unifi_network_dhcp_apply: "{{ unifi_network_dhcp_apply__default if unifi_network_dhcp_apply__default is defined else unifi_network_dhcp_apply | default(omit) }}"
   when: _unifi_network_dhcp__argspec_resolved | default(false)
+  # At least one option carries no_log, and set_fact would otherwise print every
+  # resolved value — including that one — in the task result.
+  no_log: true
 
 - name: Record that this role has resolved its options in this play
   ansible.builtin.set_fact:

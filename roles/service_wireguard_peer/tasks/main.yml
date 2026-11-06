@@ -59,6 +59,9 @@
   no_log: true
   when: wireguard_apply | bool or wireguard_render_dir | length > 0
 
+# wg0.conf.j2 renders the private key's PATH (wireguard_private_key_path), never the key, which
+# the no_log task above writes to its own file.
+# guard-check: ignore DIFFLEAK-01 — renders the key's path, never the key
 - name: Render the peer configuration
   ansible.builtin.template:
     src: wg0.conf.j2

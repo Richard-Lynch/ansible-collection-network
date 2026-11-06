@@ -17,6 +17,7 @@ argument_specs:
         description: TSIG key for Kea DDNS (openssl rand -base64 32). From vault.
         type: str
         required: true
+        no_log: true
       bind9_image:
         type: str
         required: false

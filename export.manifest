@@ -11,6 +11,7 @@
 CHANGELOG.md
 LICENSE
 README.md
+ci/affected-scenarios.sh
 configured_roles.txt
 devkit.toml
 export.manifest

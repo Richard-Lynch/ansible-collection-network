@@ -47,6 +47,7 @@ argument_specs = ArgumentSpecs(
                     type="bool", required=False, default=False
                 ),
                 "unifi_network_api_key": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description="UniFi API key for the X-API-KEY header. Never defaulted, never logged.",

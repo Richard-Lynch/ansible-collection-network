@@ -1,5 +1,7 @@
-roles/config_vlan_probe/files/broadcast_relay.py shebang
+ci/affected-scenarios.sh shellcheck:SC2086
+ci/affected-scenarios.sh shellcheck:SC2164
 roles/config_vlan_probe/files/broadcast_relay.py pylint:disallowed-name
-roles/config_vlan_probe/files/test_broadcast_relay.py shebang
+roles/config_vlan_probe/files/broadcast_relay.py shebang
 roles/config_vlan_probe/files/test_broadcast_relay.py pylint:disallowed-name
+roles/config_vlan_probe/files/test_broadcast_relay.py shebang
 roles/config_vlan_probe/files/wake_endpoint.py shebang

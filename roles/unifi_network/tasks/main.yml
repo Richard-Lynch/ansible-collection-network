@@ -37,6 +37,18 @@
     return_content: true
   register: _net_live
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Fetch the live network configuration answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _net_live.status | default(0) in [200]
+    fail_msg: >-
+      Fetch the live network configuration: HTTP {{ _net_live.status | default('none') }}, expected [200]
+      ({{ _net_live.msg | default('no message') }}).
+    quiet: true
 
 - name: Locate the target and the model
   # Loop-based, not selectattr: `selectattr('vlan', ...)` RAISES on the WAN and VPN objects, which
@@ -56,6 +68,7 @@
       {%- set _ = out.append(n) -%}{%- endif -%}
       {%- endfor -%}
       {{ out | first | default({}) }}
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: HARD GATE — a model network must exist when creating a new one
   ansible.builtin.assert:
@@ -97,6 +110,7 @@
                     'dhcpd_stop': unifi_network_dhcp_stop})
          | dict2items | rejectattr('key', 'equalto', 'dhcp_relay_servers')
          | items2dict }}
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: Report the plan
   ansible.builtin.debug:
@@ -127,6 +141,19 @@
   register: _net_create
   when: (_net_existing | length) == 0
   changed_when: (_net_existing | length) == 0
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Create the network answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _net_create.status | default(0) in [200, 201]
+    fail_msg: >-
+      Create the network: HTTP {{ _net_create.status | default('none') }}, expected [200, 201]
+      ({{ _net_create.msg | default('no message') }}).
+    quiet: true
+  when: (_net_existing | length) == 0
 
 - name: Update the network
   ansible.builtin.uri:
@@ -144,6 +171,19 @@
   register: _net_update
   when: (_net_existing | length) > 0
   changed_when: (_net_existing | length) > 0
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Update the network answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _net_update.status | default(0) in [200]
+    fail_msg: >-
+      Update the network: HTTP {{ _net_update.status | default('none') }}, expected [200]
+      ({{ _net_update.msg | default('no message') }}).
+    quiet: true
+  when: (_net_existing | length) > 0
 
 - name: Read the network back
   # Never trust the write's own response — the controller normalises and sometimes silently drops
@@ -158,6 +198,18 @@
     return_content: true
   register: _net_after
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Read the network back answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _net_after.status | default(0) in [200]
+    fail_msg: >-
+      Read the network back: HTTP {{ _net_after.status | default('none') }}, expected [200]
+      ({{ _net_after.msg | default('no message') }}).
+    quiet: true
 
 - name: Extract it as the controller now holds it
   ansible.builtin.set_fact:
@@ -168,6 +220,7 @@
       {%- set _ = out.append(n) -%}{%- endif -%}
       {%- endfor -%}
       {{ out | first | default({}) }}
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: HARD GATE — the controller must hold what we asked for
   ansible.builtin.assert:

@@ -36,6 +36,18 @@
     return_content: true
   register: _wlan_live
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Fetch the live WLAN configuration answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _wlan_live.status | default(0) in [200]
+    fail_msg: >-
+      Fetch the live WLAN configuration: HTTP {{ _wlan_live.status | default('none') }}, expected [200]
+      ({{ _wlan_live.msg | default('no message') }}).
+    quiet: true
 
 - name: Fetch the live network configuration (to resolve the target network by name)
   ansible.builtin.uri:
@@ -48,6 +60,18 @@
     return_content: true
   register: _net_live
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Fetch the live network configuration (to resolve the target network by name) answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _net_live.status | default(0) in [200]
+    fail_msg: >-
+      Fetch the live network configuration (to resolve the target network by name): HTTP {{ _net_live.status | default('none') }}, expected [200]
+      ({{ _net_live.msg | default('no message') }}).
+    quiet: true
 
 - name: Resolve the target network
   ansible.builtin.set_fact:
@@ -60,6 +84,7 @@
     _wlan_model: >-
       {{ _wlan_live.json.data | selectattr('name', 'equalto', unifi_wlan_model_ssid)
          | list | first | default({}) }}
+  no_log: true  # the API key, and WLAN objects carrying passphrases
 
 - name: HARD GATE — the target network must exist
   # Refusing to guess: an SSID attached to the wrong network puts every device that joins it on the
@@ -110,6 +135,7 @@
           'networkconf_id': _wlan_target_net._id,
           'is_guest': false,
           'x_passphrase': unifi_wlan_passphrase} }}
+  no_log: true  # the API key, and WLAN objects carrying passphrases
 
 - name: Report the plan
   # The passphrase is deliberately absent from this message.
@@ -143,6 +169,19 @@
   register: _wlan_create
   when: (_wlan_existing | length) == 0
   changed_when: (_wlan_existing | length) == 0
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Create the WLAN answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _wlan_create.status | default(0) in [200, 201]
+    fail_msg: >-
+      Create the WLAN: HTTP {{ _wlan_create.status | default('none') }}, expected [200, 201]
+      ({{ _wlan_create.msg | default('no message') }}).
+    quiet: true
+  when: (_wlan_existing | length) == 0
 
 # THE POST SILENTLY DROPS FIELDS THE PUT ACCEPTS. Creating a WLAN with hide_ssid/pmf_mode/
 # wpa3_support in the POST body can return rc=ok and store the MODEL's values for all three — the
@@ -164,6 +203,19 @@
   register: _wlan_postcreate
   when: (_wlan_existing | length) == 0
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Re-read the WLAN after creation to get its new id answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _wlan_postcreate.status | default(0) in [200]
+    fail_msg: >-
+      Re-read the WLAN after creation to get its new id: HTTP {{ _wlan_postcreate.status | default('none') }}, expected [200]
+      ({{ _wlan_postcreate.msg | default('no message') }}).
+    quiet: true
+  when: (_wlan_existing | length) == 0
 
 - name: Resolve the id to enforce settings against
   ansible.builtin.set_fact:
@@ -187,6 +239,18 @@
     return_content: true
   register: _wlan_update
   changed_when: true
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Update the WLAN answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _wlan_update.status | default(0) in [200]
+    fail_msg: >-
+      Update the WLAN: HTTP {{ _wlan_update.status | default('none') }}, expected [200]
+      ({{ _wlan_update.msg | default('no message') }}).
+    quiet: true
 
 - name: Read the WLAN back from the controller
   # Never trust the write's own response: the controller can accept a POST and normalise or reject
@@ -201,12 +265,25 @@
     return_content: true
   register: _wlan_after
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and WLAN objects carrying passphrases
+
+- name: HARD GATE — Read the WLAN back from the controller answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _wlan_after.status | default(0) in [200]
+    fail_msg: >-
+      Read the WLAN back from the controller: HTTP {{ _wlan_after.status | default('none') }}, expected [200]
+      ({{ _wlan_after.msg | default('no message') }}).
+    quiet: true
 
 - name: Extract the WLAN as the controller now holds it
   ansible.builtin.set_fact:
     _wlan_readback: >-
       {{ _wlan_after.json.data | selectattr('name', 'equalto', unifi_wlan_ssid)
          | list | first | default({}) }}
+  no_log: true  # the API key, and WLAN objects carrying passphrases
 
 - name: HARD GATE — the controller must hold what we asked for
   ansible.builtin.assert:

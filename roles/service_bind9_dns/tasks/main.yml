@@ -93,6 +93,9 @@
     # 0644 so the in-container `bind` user can read it; protect the secret by restricting access to
     # bind9_config_dir on the host, not by mode. 0640 → bind9 exits "permission denied".
     mode: "0644"
+  # The file holds both TSIG secrets: --diff would print them, and a failed task its result.
+  no_log: true
+  diff: false
   notify: Restart bind9
 
 - name: Render named.conf.options (options{}/logging{} — rendered FRESH every run)

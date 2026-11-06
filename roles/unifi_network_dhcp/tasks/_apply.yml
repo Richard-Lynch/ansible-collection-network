@@ -41,6 +41,19 @@
     return_content: true
   register: _unifi_live_http
   changed_when: false
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Fetch the live network configuration answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _unifi_live_http.status | default(0) in [200]
+    fail_msg: >-
+      Fetch the live network configuration: HTTP {{ _unifi_live_http.status | default('none') }}, expected [200]
+      ({{ _unifi_live_http.msg | default('no message') }}).
+    quiet: true
+  when: unifi_network_dhcp_live_fixture is not defined
 
 - name: Resolve which source the live data came from
   # `register:` fires even when a task is SKIPPED, writing a skip result over anything already in
@@ -50,6 +63,7 @@
   ansible.builtin.set_fact:
     _unifi_live: >-
       {{ _unifi_live_stub if (unifi_network_dhcp_live_fixture is defined) else _unifi_live_http }}
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: Index the live networks by VLAN id
   # Keys are cast to STRING because a caller passing `vlan: "{{ item.id }}"` supplies "110" while
@@ -61,6 +75,7 @@
       {{ dict(_unifi_live.json.data | selectattr('vlan', 'defined')
               | map(attribute='vlan') | map('string') | zip(
               _unifi_live.json.data | selectattr('vlan', 'defined'))) }}
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: Assert every requested VLAN exists on the controller
   ansible.builtin.assert:
@@ -113,6 +128,7 @@
   loop: "{{ _unifi_requests }}"
   loop_control:
     label: "vlan {{ item.vlan }}"
+  no_log: true  # the API key, and controller objects that can carry secrets
 
 - name: Report the change set
   ansible.builtin.debug:
@@ -120,7 +136,12 @@
       vlan {{ item.vlan }} ({{ item.name }}):
       {{ 'NO CHANGE' if not (item.changed | bool)
          else (item.before | to_json) ~ '  ->  ' ~ (item.wanted | to_json) }}
-  loop: "{{ _unifi_changes | default([]) }}"
+  # Each loop item is recorded in the task result, so the loop carries only the reported fields,
+  # never `merged` (the whole controller object).
+  loop: >-
+    {{ _unifi_changes | default([]) | map('dict2items')
+             | map('selectattr', 'key', 'in', ['vlan', 'name', 'changed', 'before', 'wanted'])
+             | map('items2dict') | list }}
   loop_control:
     label: "vlan {{ item.vlan }}"
 
@@ -152,6 +173,20 @@
   register: _unifi_applied
   changed_when: true
   when: (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Apply the change set answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _unifi_applied.results | default([]) | rejectattr('skipped', 'defined') | rejectattr('status', 'in', [200]) | list | length == 0
+    fail_msg: >-
+      Apply the change set: one or more requests failed (HTTP
+      {{ _unifi_applied.results | default([]) | rejectattr('skipped', 'defined') | map(attribute='status', default='none') | list }}:
+      {{ _unifi_applied.results | default([]) | rejectattr('skipped', 'defined') | map(attribute='msg', default='') | list }}).
+    quiet: true
+  when: (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
 
 - name: Skip the read-back when running against a fixture (test only)
   ansible.builtin.set_fact:
@@ -176,6 +211,24 @@
     - unifi_network_dhcp_live_fixture is not defined
     - (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
     - (_unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list) | length > 0
+  failed_when: false
+  no_log: true  # the API key, and controller objects that can carry secrets
+
+- name: HARD GATE — Verify the applied settings read back as intended answered
+  # The request above is no_log; this reports its status and message only.
+  ansible.builtin.assert:
+    that:
+      - _unifi_after.status | default(0) in [200]
+    fail_msg: >-
+      Verify the applied settings read back as intended: HTTP {{ _unifi_after.status | default('none') }}, expected [200]
+      ({{ _unifi_after.msg | default('no message') }}).
+    quiet: true
+  when:
+    # NOT a second `when:` key — YAML keeps only the last mapping key, so a duplicate silently
+    # DISCARDS the earlier condition. The fixture guard is a member of this list for that reason.
+    - unifi_network_dhcp_live_fixture is not defined
+    - (unifi_network_dhcp_apply | default(unifi_network_dhcp_apply__default)) | bool
+    - (_unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list) | length > 0
 
 - name: HARD GATE — the controller must now report the values we asked for
   ansible.builtin.assert:
@@ -191,7 +244,10 @@
     _after_net: >-
       {{ (_unifi_after.json.data | selectattr('vlan', 'defined')
           | selectattr('vlan', 'equalto', item.vlan | int) | first) }}
-  loop: "{{ _unifi_changes | default([]) | selectattr('changed', 'equalto', true) | list }}"
+  # The loop item is recorded in the result, so it carries only what the gate reads, not `merged`.
+  loop: >-
+    {{ _unifi_changes | default([]) | selectattr('changed', 'equalto', true) | map('dict2items')
+       | map('selectattr', 'key', 'in', ['vlan', 'name', 'wanted']) | map('items2dict') | list }}
   loop_control:
     label: "vlan {{ item.vlan }}"
   when:
