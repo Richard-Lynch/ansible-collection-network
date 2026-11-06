@@ -7,12 +7,13 @@
 
 - name: Read zone — write the TSIG keyfile
   # template, not copy-with-inline-content: a copy dumps its full module args (secret included) at
-  # -vvv. diff:false closes --diff as well.
-  # Failures, rc and stderr all stay visible — this hides the secret, not the diagnostics.
+  # -vvv. no_log as well as diff: false, because the rendered file IS the secret, and a failed
+  # task's result and a callback that records every result must not carry it either.
   ansible.builtin.template:
     src: tsig-key.conf.j2
     dest: "{{ _svc_keyfile }}"
     mode: "0600"
+  no_log: true
   diff: false
   vars:
     # The shared template uses neutral names so the same file serves both keys; map the role's

@@ -47,6 +47,7 @@ argument_specs:
         description: TSIG key for svc.* zones. From vault; never defaulted.
         type: str
         required: true
+        no_log: true
       bind9_addr:
         description: Address of the bind9 server the zone is read from and updated on.
         type: str

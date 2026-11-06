@@ -64,6 +64,7 @@ argument_specs = ArgumentSpecs(
                 "unifi_wlan_site": OptionSpec(type="str", required=False, default="default"),
                 "unifi_wlan_validate_certs": OptionSpec(type="bool", required=False, default=False),
                 "unifi_wlan_api_key": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description=(

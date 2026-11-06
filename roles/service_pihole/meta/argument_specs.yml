@@ -17,6 +17,7 @@ argument_specs:
         description: Web/API password (from your secrets manager). Placeholder is rejected.
         type: str
         required: true
+        no_log: true
       pihole_image:
         type: str
         required: false
@@ -156,3 +157,4 @@ argument_specs:
         description: Web/API password (from your secrets manager). Placeholder is rejected.
         type: str
         required: true
+        no_log: true

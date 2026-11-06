@@ -12,6 +12,7 @@ argument_specs = ArgumentSpecs(
             author=DEFAULT_AUTHOR,
             options={
                 "ddns_tsig_key_secret": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description="TSIG key for Kea DDNS (openssl rand -base64 32). From vault.",

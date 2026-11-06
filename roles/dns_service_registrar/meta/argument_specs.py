@@ -43,6 +43,7 @@ argument_specs = ArgumentSpecs(
                     type="str", required=False, default="hmac-sha256"
                 ),
                 "svc_tsig_key_secret": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=True,
                     description="TSIG key for svc.* zones. From vault; never defaulted.",

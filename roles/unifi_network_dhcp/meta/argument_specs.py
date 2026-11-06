@@ -25,6 +25,7 @@ argument_specs = ArgumentSpecs(
                     ],
                 ),
                 "unifi_network_dhcp_api_key": OptionSpec(
+                    no_log=True,
                     type="str",
                     required=False,
                     default="CHANGE_ME_VIA_1PASSWORD",
