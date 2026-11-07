@@ -10,6 +10,7 @@
 .python-version
 CHANGELOG.md
 LICENSE
+Makefile
 README.md
 ci/affected-scenarios.sh
 configured_roles.txt
@@ -27,6 +28,7 @@ plugins/filter/hosting_edge_winner.yml
 plugins/filter/hosting_edge_winner_diff.yml
 plugins/filter/hosting_edge_winner_map.yml
 renovate.json
+requirements.yml
 roles/cloudflare_access_mtls/README.md
 roles/cloudflare_access_mtls/defaults/associate.yml
 roles/cloudflare_access_mtls/defaults/ca.yml
